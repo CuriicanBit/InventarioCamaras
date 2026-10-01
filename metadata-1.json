@@ -1,0 +1,6 @@
+{
+  "name": "CCTV InfraRegistro - Inventario Técnico Universitario",
+  "description": "Sistema de registro técnico de campo e inventario de infraestructura CCTV, racks y redes para campus universitario.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
