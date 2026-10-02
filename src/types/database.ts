@@ -187,7 +187,7 @@ export type TipoIntervencion =
 
 export interface HistorialMantenimiento {
   id: string;
-  entidad_tipo: 'equipo' | 'camara';
+  entidad_tipo: 'equipo' | 'camara' | 'rack';
   entidad_id: string;
   tipo_intervencion: TipoIntervencion;
   fecha: string;

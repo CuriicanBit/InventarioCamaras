@@ -18,13 +18,14 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Camara, Equipo, HistorialMantenimiento, TipoIntervencion } from '../types/database';
+import { Camara, Equipo, Rack, HistorialMantenimiento, TipoIntervencion } from '../types/database';
 
 interface MaintenanceHistoryProps {
-  entityType?: 'camara' | 'equipo';
+  entityType?: 'camara' | 'equipo' | 'rack';
   entityId?: string;
   camera?: Camara;
   equipo?: Equipo;
+  rack?: Rack;
   onBack: () => void;
 }
 
@@ -33,6 +34,7 @@ export const MaintenanceHistory: React.FC<MaintenanceHistoryProps> = ({
   entityId,
   camera,
   equipo,
+  rack,
   onBack,
 }) => {
   const [intervenciones, setIntervenciones] = useState<HistorialMantenimiento[]>([]);
@@ -56,9 +58,15 @@ export const MaintenanceHistory: React.FC<MaintenanceHistoryProps> = ({
   });
   const [saving, setSaving] = useState(false);
 
-  const activeId = entityId || camera?.id || equipo?.id;
-  const activeCode = camera?.codigo || equipo?.codigo || 'CAM-ENG-P2-08';
-  const activeModel = camera ? `${camera.marca || ''} ${camera.modelo || ''}` : equipo ? `${equipo.marca || ''} ${equipo.modelo || ''}` : 'DS-2CD2143G2-I';
+  const activeId = entityId || camera?.id || equipo?.id || rack?.id;
+  const activeCode = camera?.codigo || equipo?.codigo || (rack ? `Rack ${rack.codigo}` : 'DISPOSITIVO');
+  const activeModel = camera 
+    ? `${camera.marca || ''} ${camera.modelo || ''}` 
+    : equipo 
+    ? `${equipo.marca || ''} ${equipo.modelo || ''}` 
+    : rack 
+    ? `Bastidor ${rack.altura_u || 42}U (${rack.formato || 'Estándar 19"'})` 
+    : '';
 
   const loadHistory = async () => {
     try {
@@ -167,7 +175,7 @@ export const MaintenanceHistory: React.FC<MaintenanceHistoryProps> = ({
       {/* Top Banner strip */}
       <div className="flex items-center justify-between text-[11px] font-mono border-b border-slate-200 pb-2 text-slate-500">
         <div className="flex items-center gap-2">
-          <span>Campus Central &gt; Edificio A (Ingeniería) &gt; Piso 2 &gt; <strong className="text-slate-800">{activeCode} (Bitácora)</strong></span>
+          <span>Infraestructura CCTV &gt; Planta Física &gt; <strong className="text-slate-800">{activeCode} (Bitácora)</strong></span>
         </div>
         <div className="flex items-center gap-2">
           <span className="text-blue-700 font-semibold flex items-center gap-1">
@@ -182,23 +190,37 @@ export const MaintenanceHistory: React.FC<MaintenanceHistoryProps> = ({
         <div className="flex items-center gap-3">
           <button 
             onClick={onBack}
-            className="p-1.5 border border-slate-300 rounded hover:bg-slate-100 text-slate-600 transition-colors"
+            className="p-1.5 border border-slate-300 rounded hover:bg-slate-100 text-slate-600 transition-colors cursor-pointer"
             title="Volver"
           >
             <ArrowLeft className="w-4 h-4" />
           </button>
           <div>
             <div className="flex items-center gap-2">
-              <Camera className="w-5 h-5 text-blue-600" />
+              {entityType === 'rack' ? (
+                <Server className="w-5 h-5 text-blue-600" />
+              ) : entityType === 'equipo' ? (
+                <Server className="w-5 h-5 text-emerald-600" />
+              ) : (
+                <Camera className="w-5 h-5 text-blue-600" />
+              )}
               <h1 className="text-xl font-bold font-mono text-slate-900 tracking-tight">
                 Bitácora Técnica · {activeCode}
               </h1>
-              <span className="text-xs font-mono bg-slate-100 text-slate-700 border border-slate-200 px-2 py-0.5 rounded">
-                {activeModel}
-              </span>
+              {activeModel && (
+                <span className="text-xs font-mono bg-slate-100 text-slate-700 border border-slate-200 px-2 py-0.5 rounded font-semibold">
+                  {activeModel}
+                </span>
+              )}
             </div>
             <p className="text-xs text-slate-500 font-mono mt-0.5">
-              MAC: {camera?.direccion_mac || '54:8C:AF:33:91:2B'} · Edificio A de Ingeniería, Piso 2 (Sala Técnica: RCK-ENG-P2-01)
+              {entityType === 'rack'
+                ? `${rack?.ubicacion_especifica || 'Sala Técnica'} · ${rack?.formato || 'Bastidor Estándar 19"'} · Capacidad ${rack?.altura_u || 42}U`
+                : camera
+                ? `MAC: ${camera.direccion_mac || 'No registrada'} · ${camera.ubicacion_especifica || 'Piso 2'} · IP ${camera.direccion_ip || 'No asignada'}`
+                : equipo
+                ? `IP: ${equipo.ip_gestion || 'No asignada'} · Serie ${equipo.numero_serie || 'N/A'}`
+                : 'Registro de intervenciones'}
             </p>
           </div>
         </div>
@@ -370,43 +392,74 @@ export const MaintenanceHistory: React.FC<MaintenanceHistoryProps> = ({
 
         {/* RIGHT COLUMN: Parámetros de Enlace & Técnicos */}
         <div className="lg:col-span-4 space-y-6">
-          {/* Parámetros de Enlace */}
+          {/* Parámetros de Enlace / Especificaciones Físicas */}
           <div className="bg-white border border-slate-200 rounded-lg p-5 shadow-xs font-mono text-xs">
             <h3 className="font-bold text-slate-900 uppercase text-[11px] tracking-wider pb-2 border-b border-slate-200 mb-3 flex items-center justify-between">
-              <span>Parámetros de Enlace Físico</span>
+              <span>{entityType === 'rack' ? 'Ficha Resumida del Rack' : 'Parámetros de Enlace Físico'}</span>
               <Settings className="w-3.5 h-3.5 text-slate-400" />
             </h3>
 
-            <div className="space-y-2 text-[11px]">
-              <div className="flex justify-between py-1 border-b border-slate-100">
-                <span className="text-slate-500">Dirección IP Estática</span>
-                <span className="font-bold text-blue-700">{camera?.direccion_ip || 'No asignada'}</span>
+            {entityType === 'rack' ? (
+              <div className="space-y-2 text-[11px]">
+                <div className="flex justify-between py-1 border-b border-slate-100">
+                  <span className="text-slate-500">Formato / Bastidor</span>
+                  <span className="font-bold text-slate-800">{rack?.formato || 'Estándar 19"'}</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-slate-100">
+                  <span className="text-slate-500">Capacidad Total</span>
+                  <span className="font-bold text-blue-700">{rack?.altura_u || 42}U</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-slate-100">
+                  <span className="text-slate-500">Ubicación Específica</span>
+                  <span className="text-slate-800">{rack?.ubicacion_especifica || 'Sala Técnica'}</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-slate-100">
+                  <span className="text-slate-500">Custodia de Llaves</span>
+                  <span className="text-slate-800">{rack?.custodia_llave || 'No registrada'}</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-slate-100">
+                  <span className="text-slate-500">Carga Máxima</span>
+                  <span className="text-slate-800">{rack?.carga_maxima_kg ? `${rack.carga_maxima_kg} kg` : '800 kg'}</span>
+                </div>
+                <div className="flex justify-between py-1">
+                  <span className="text-slate-500">Responsable Técnico</span>
+                  <span className="text-slate-800">{rack?.tecnico_responsable || 'No asignado'}</span>
+                </div>
               </div>
-              <div className="flex justify-between py-1 border-b border-slate-100">
-                <span className="text-slate-500">Dirección MAC</span>
-                <span className="text-slate-800">{camera?.direccion_mac || 'No registrada'}</span>
+            ) : (
+              <div className="space-y-2 text-[11px]">
+                <div className="flex justify-between py-1 border-b border-slate-100">
+                  <span className="text-slate-500">Dirección IP Estática</span>
+                  <span className="font-bold text-blue-700">{camera?.direccion_ip || equipo?.ip_gestion || 'No asignada'}</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-slate-100">
+                  <span className="text-slate-500">Dirección MAC</span>
+                  <span className="text-slate-800">{camera?.direccion_mac || 'No registrada'}</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-slate-100">
+                  <span className="text-slate-500">Puerto Switch</span>
+                  <span className="text-slate-800">{camera?.puerto_switch || 'No configurado'}</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-slate-100">
+                  <span className="text-slate-500">Puerto Patch Panel</span>
+                  <span className="text-slate-800">{camera?.puerto_patch ? `Puerto ${camera.puerto_patch}` : 'Sin parchear'}</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-slate-100">
+                  <span className="text-slate-500">Canal NVR</span>
+                  <span className="text-slate-800">{camera?.canal_nvr ? `Canal ${camera.canal_nvr}` : 'No asignado'}</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-slate-100">
+                  <span className="text-slate-500">Número de Serie</span>
+                  <span className="text-slate-800">{camera?.numero_serie || equipo?.numero_serie || 'No registrado'}</span>
+                </div>
+                <div className="flex justify-between py-1">
+                  <span className="text-slate-500">Resolución / Capacidad</span>
+                  <span className="text-slate-800">
+                    {camera?.resolucion_mp ? `${camera.resolucion_mp} MP` : equipo?.puertos_totales ? `${equipo.puertos_totales} Puertos` : 'N/A'}
+                  </span>
+                </div>
               </div>
-              <div className="flex justify-between py-1 border-b border-slate-100">
-                <span className="text-slate-500">Puerto Switch</span>
-                <span className="text-slate-800">{camera?.puerto_switch || 'No configurado'}</span>
-              </div>
-              <div className="flex justify-between py-1 border-b border-slate-100">
-                <span className="text-slate-500">Puerto Patch Panel</span>
-                <span className="text-slate-800">{camera?.puerto_patch ? `Puerto ${camera.puerto_patch}` : 'Sin parchear'}</span>
-              </div>
-              <div className="flex justify-between py-1 border-b border-slate-100">
-                <span className="text-slate-500">Canal NVR</span>
-                <span className="text-slate-800">{camera?.canal_nvr ? `Canal ${camera.canal_nvr}` : 'No asignado'}</span>
-              </div>
-              <div className="flex justify-between py-1 border-b border-slate-100">
-                <span className="text-slate-500">Número de Serie</span>
-                <span className="text-slate-800">{camera?.numero_serie || 'No registrado'}</span>
-              </div>
-              <div className="flex justify-between py-1">
-                <span className="text-slate-500">Resolución Sensor</span>
-                <span className="text-slate-800">{camera?.resolucion_mp ? `${camera.resolucion_mp} MP` : 'No especificada'}</span>
-              </div>
-            </div>
+            )}
           </div>
 
           {/* Técnicos con Intervenciones Registradas */}

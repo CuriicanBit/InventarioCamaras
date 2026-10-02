@@ -118,22 +118,18 @@ export const Header: React.FC<HeaderProps> = ({
     { id: 'catalogos', label: 'Catálogos', icon: <Tag className="w-3.5 h-3.5" /> },
   ];
 
-  // Determine how many items fit in the horizontal bar without overflowing:
-  // All 11 items need approx 1550px of header width.
-  const allFit = headerWidth >= 1550;
-  // If not all fit, how many primary shortcuts can we comfortably show?
-  const visibleShortcutCount = allFit 
-    ? 11 
-    : headerWidth >= 1250 
-    ? 5 
-    : headerWidth >= 950 
-    ? 3 
-    : headerWidth >= 780 
+  // Number of horizontal quick shortcuts based on available header width
+  // In any resolution, the Hamburger Menu button is ALWAYS visible and fixed in the corner
+  const visibleShortcutCount = headerWidth >= 1400 
+    ? 6 
+    : headerWidth >= 1150 
+    ? 4 
+    : headerWidth >= 900 
     ? 2 
     : 0;
 
   const visibleNavItems = navItems.slice(0, visibleShortcutCount);
-  const showHamburger = !allFit;
+  const showHamburger = true; // Always visible as per user requirement
 
   const handleNavClick = (viewId: NavView) => {
     onNavigate(viewId);
@@ -185,64 +181,67 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Horizontal Navigation Bar (items that fit comfortably) */}
-          {visibleNavItems.length > 0 && (
-            <nav className="flex items-center gap-1 py-1 px-1 overflow-hidden min-w-0">
-              {visibleNavItems.map((item) => {
-                const isActive = currentView === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    onClick={() => handleNavClick(item.id)}
-                    className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded transition-all whitespace-nowrap shrink-0 ${
-                      isActive
-                        ? 'bg-blue-600 text-white shadow-xs font-semibold'
-                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100 font-medium'
-                    }`}
-                  >
-                    {item.icon}
-                    <span>{item.label}</span>
-                    {item.id === 'elevacion' && selectedRackCode && (
-                      <span className={`text-[10px] font-mono px-1 rounded ${isActive ? 'bg-blue-700 text-blue-100' : 'bg-slate-200 text-slate-600'}`}>
-                        {selectedRackCode}
-                      </span>
-                    )}
-                    {item.badge !== undefined && item.badge > 0 && (
-                      <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded font-bold ${
-                        isActive ? 'bg-amber-400 text-slate-900' : 'bg-amber-100 text-amber-800'
-                      }`}>
-                        {item.badge}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </nav>
-          )}
+          <div className="flex-1 min-w-0 flex items-center justify-end sm:justify-center overflow-hidden">
+            {visibleNavItems.length > 0 && (
+              <nav className="flex items-center gap-1 py-1 px-1 overflow-x-auto scrollbar-none max-w-full">
+                {visibleNavItems.map((item) => {
+                  const isActive = currentView === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => handleNavClick(item.id)}
+                      className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+                        isActive
+                          ? 'bg-blue-600 text-white shadow-xs font-semibold'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100 font-medium'
+                      }`}
+                    >
+                      {item.icon}
+                      <span>{item.label}</span>
+                      {item.id === 'elevacion' && selectedRackCode && (
+                        <span className={`text-[10px] font-mono px-1 rounded ${isActive ? 'bg-blue-700 text-blue-100' : 'bg-slate-200 text-slate-600'}`}>
+                          {selectedRackCode}
+                        </span>
+                      )}
+                      {item.badge !== undefined && item.badge > 0 && (
+                        <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded font-bold ${
+                          isActive ? 'bg-amber-400 text-slate-900' : 'bg-amber-100 text-amber-800'
+                        }`}>
+                          {item.badge}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </nav>
+            )}
+          </div>
 
-          {/* Standard Hamburger Menu Button - Always visible whenever not all items fit */}
-          {showHamburger && (
-            <div ref={menuContainerRef} className="flex items-center shrink-0">
-              <button
-                type="button"
-                onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-semibold border transition-all shadow-2xs shrink-0 ${
-                  mobileMenuOpen 
-                    ? 'bg-blue-600 text-white border-blue-600 ring-2 ring-blue-200' 
-                    : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50 hover:text-slate-900 hover:border-slate-400'
-                }`}
-                aria-label={mobileMenuOpen ? 'Cerrar menú' : 'Abrir menú de navegación'}
-                aria-expanded={mobileMenuOpen}
-              >
-                {mobileMenuOpen ? <X className="w-4 h-4 text-white" /> : <Menu className="w-4 h-4 text-slate-700" />}
-                <span className="font-mono text-xs">
-                  {mobileMenuOpen ? 'Cerrar' : 'Menú'}
-                </span>
-                {(warehouseCount > 0 || unassignedCount > 0) && (
-                  <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
-                )}
-              </button>
-            </div>
-          )}
+          {/* Menú de Navegación Hamburguesa SIEMPRE VISIBLE en la esquina superior (Sticky/Fixed) */}
+          <div 
+            ref={menuContainerRef} 
+            className="sticky right-0 top-0 z-20 shrink-0 flex items-center pl-2 bg-gradient-to-l from-white via-white to-transparent"
+          >
+            <button
+              type="button"
+              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-semibold border transition-all shadow-xs shrink-0 cursor-pointer select-none ${
+                mobileMenuOpen 
+                  ? 'bg-blue-600 text-white border-blue-600 ring-2 ring-blue-200' 
+                  : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-50 hover:text-slate-950 hover:border-slate-400'
+              }`}
+              aria-label={mobileMenuOpen ? 'Cerrar menú' : 'Abrir menú de navegación'}
+              aria-expanded={mobileMenuOpen}
+            >
+              {mobileMenuOpen ? <X className="w-4 h-4 text-white" /> : <Menu className="w-4 h-4 text-slate-800" />}
+              <span className="font-mono text-xs font-bold">
+                {mobileMenuOpen ? 'Cerrar' : 'Menú'}
+              </span>
+              {(warehouseCount > 0 || unassignedCount > 0) && (
+                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Collapsible Full Modules Menu Drawer */}
