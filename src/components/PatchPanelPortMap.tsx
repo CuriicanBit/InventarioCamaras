@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Rack, Equipo, Camara, Piso, Edificio } from '../types/database';
+import { getOccupancyStatus } from '../utils/occupancyAlerts';
 
 interface PatchPanelPortMapProps {
   rack?: Rack | null;
@@ -1801,14 +1802,35 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
                             </div>
                           )}
 
-                          <div className="text-right text-[11px] font-mono">
-                            <span className="text-slate-300 font-bold">
-                              {connectedCount} / {totalPorts} Puertos
-                            </span>
-                            <span className="text-[10px] text-slate-400 block">
-                              ({totalPorts > 0 ? Math.round((connectedCount / totalPorts) * 100) : 0}% ocupado)
-                            </span>
-                          </div>
+                          {(() => {
+                            const occPct = totalPorts > 0 ? Math.round((connectedCount / totalPorts) * 100) : 0;
+                            const occ = getOccupancyStatus(occPct);
+                            return (
+                              <div className="flex items-center gap-2">
+                                <div 
+                                  className={`px-2 py-0.5 rounded border text-[10px] font-mono font-bold flex items-center gap-1.5 ${
+                                    occ.status === 'critico'
+                                      ? 'bg-rose-950/90 text-rose-200 border-rose-500 animate-pulse'
+                                      : occ.status === 'alerta'
+                                      ? 'bg-amber-950/90 text-amber-200 border-amber-500'
+                                      : 'bg-emerald-950/90 text-emerald-200 border-emerald-500'
+                                  }`}
+                                  title={`Estándar 75%: ${occ.label}. ${occ.recommendation}`}
+                                >
+                                  <span className={`w-1.5 h-1.5 rounded-full ${
+                                    occ.status === 'critico' ? 'bg-rose-400' : occ.status === 'alerta' ? 'bg-amber-400' : 'bg-emerald-400'
+                                  }`} />
+                                  <span>{occPct}%</span>
+                                  <span className="hidden sm:inline font-normal opacity-90">({connectedCount}/{totalPorts})</span>
+                                </div>
+                                <div className="text-right text-[11px] font-mono hidden md:block">
+                                  <span className="text-slate-300 font-bold block text-[10px]">
+                                    {totalPorts - connectedCount} libres
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })()}
                         </div>
                       </div>
 
@@ -1955,12 +1977,30 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
                             </div>
 
                             {/* Recording Stats */}
-                            <div className="mt-2.5 pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] font-mono">
-                              <span className="text-slate-400">Canales CCTV Asignados:</span>
-                              <span className="text-indigo-300 font-bold">
-                                {channelCount} {nvr.canales_totales ? `/ ${nvr.canales_totales}` : ''} canal(es)
-                              </span>
-                            </div>
+                            {(() => {
+                              const nvrCap = nvr.canales_totales || 16;
+                              const occPct = nvrCap > 0 ? Math.round((channelCount / nvrCap) * 100) : 0;
+                              const occ = getOccupancyStatus(occPct);
+                              return (
+                                <div className="mt-2.5 pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] font-mono">
+                                  <span className="text-slate-400">Canales CCTV Asignados:</span>
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-indigo-300 font-bold">
+                                      {channelCount} / {nvrCap}
+                                    </span>
+                                    <span className={`px-1.5 py-0.2 rounded border text-[9px] font-bold ${
+                                      occ.status === 'critico'
+                                        ? 'bg-rose-950 text-rose-300 border-rose-600'
+                                        : occ.status === 'alerta'
+                                        ? 'bg-amber-950 text-amber-300 border-amber-600'
+                                        : 'bg-emerald-950 text-emerald-300 border-emerald-600'
+                                    }`} title={`Estándar 75%: ${occ.label}. ${occ.recommendation}`}>
+                                      {occPct}% ({occ.label})
+                                    </span>
+                                  </div>
+                                </div>
+                              );
+                            })()}
 
                             {/* Uplink Destination Indicator */}
                             <div className="mt-1.5 text-[10px] font-mono flex items-center justify-between text-slate-400">

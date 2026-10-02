@@ -13,10 +13,18 @@ import {
   Building, 
   RefreshCw,
   Eye,
-  Layers
+  Layers,
+  Network,
+  AlertTriangle,
+  AlertCircle,
+  CheckCircle2,
+  Cpu,
+  Cable,
+  HardDrive
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Camara, Equipo, Rack, Piso, Edificio, Campus, Sede, Proveedor } from '../types/database';
+import { calculateEquipmentOccupancy, getOccupancyStatus, EquipmentOccupancyInfo } from '../utils/occupancyAlerts';
 
 interface InventoryItem {
   id: string;
@@ -73,6 +81,20 @@ export const InventoryList: React.FC<InventoryListProps> = ({
   const [filterProveedor, setFilterProveedor] = useState('all');
   const [filterPeriodo, setFilterPeriodo] = useState('all');
 
+  // Modal para ver dispositivos conectados y ocupación al seleccionar switch/nvr/patch
+  const [selectedConnectedEquipo, setSelectedConnectedEquipo] = useState<Equipo | null>(null);
+  const [nvrUplinks, setNvrUplinks] = useState<Record<string, any>>({});
+
+  // Load NVR uplinks from localStorage
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('cctv_nvr_uplinks');
+      if (saved) setNvrUplinks(JSON.parse(saved));
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
   // Pagination
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 10;
@@ -127,6 +149,15 @@ export const InventoryList: React.FC<InventoryListProps> = ({
   const campusMap = useMemo(() => new Map(campusList.map(c => [c.id, c])), [campusList]);
   const sedesMap = useMemo(() => new Map(sedes.map(s => [s.id, s])), [sedes]);
   const provMap = useMemo(() => new Map(proveedores.map(p => [p.id, p])), [proveedores]);
+
+  // Mapa reactivo de ocupación de equipos y estándar del 75%
+  const equipmentOccupancyMap = useMemo(() => {
+    const map: Record<string, EquipmentOccupancyInfo> = {};
+    equipos.forEach(eq => {
+      map[eq.id] = calculateEquipmentOccupancy(eq, camaras, nvrUplinks);
+    });
+    return map;
+  }, [equipos, camaras, nvrUplinks]);
 
   // Transform both cameras and equipment into a unified list
   const unifiedInventory: InventoryItem[] = useMemo(() => {
@@ -193,25 +224,36 @@ export const InventoryList: React.FC<InventoryListProps> = ({
       const campus = edificio?.campus_id ? campusMap.get(edificio.campus_id) : undefined;
       const sede = campus?.sede_id ? sedesMap.get(campus.sede_id) : undefined;
       const prov = eq.proveedor_compra_id ? provMap.get(eq.proveedor_compra_id) : undefined;
+      const occ = equipmentOccupancyMap[eq.id];
 
       const locParts: string[] = [];
       if (sede) locParts.push(sede.nombre.replace('Sede ', ''));
       if (edificio) locParts.push(edificio.nombre.replace('Edificio ', 'Edif '));
       if (piso) locParts.push(piso.nombre.replace('Piso ', 'P'));
       const locStr = locParts.length > 0 ? locParts.join(' > ') : '-';
-      const uStr = eq.posicion_u_inicio ? `(U${eq.posicion_u_inicio})` : '';
+      const uStr = eq.posicion_u_inicio && eq.posicion_u_inicio > 0 
+        ? `(U${eq.posicion_u_inicio})` 
+        : eq.rack_id 
+        ? '(Piso Shaft)' 
+        : '';
 
       let connStr = '-';
       let label = 'Equipo Activo';
       if (eq.tipo === 'switch') {
         label = `Switch PoE ${eq.puertos_totales || 24}P`;
-        connStr = eq.puertos_totales ? `${eq.puertos_totales} Puertos` : 'Switch';
+        connStr = occ && occ.totalCapacity > 0 
+          ? `${occ.occupiedCount}/${occ.totalCapacity} puertos (${occ.percentage}%)` 
+          : (eq.puertos_totales ? `${eq.puertos_totales} Puertos` : 'Switch');
       } else if (eq.tipo === 'patch_panel') {
         label = `Patch Panel ${eq.puertos_totales || 24}`;
-        connStr = eq.puertos_totales ? `${eq.puertos_totales} Puertos` : 'Patch Panel';
+        connStr = occ && occ.totalCapacity > 0 
+          ? `${occ.occupiedCount}/${occ.totalCapacity} puertos (${occ.percentage}%)` 
+          : (eq.puertos_totales ? `${eq.puertos_totales} Puertos` : 'Patch Panel');
       } else if (eq.tipo === 'nvr') {
         label = 'Grabador NVR';
-        connStr = eq.canales_totales ? `${eq.canales_totales} Canales` : 'NVR';
+        connStr = occ && occ.totalCapacity > 0 
+          ? `${occ.occupiedCount}/${occ.totalCapacity} canales (${occ.percentage}%)` 
+          : (eq.canales_totales ? `${eq.canales_totales} Canales` : 'NVR');
       } else if (eq.tipo === 'ups') {
         label = 'Sistema UPS';
         connStr = eq.capacidad_va ? `${eq.capacidad_va} VA` : 'UPS';
@@ -651,7 +693,30 @@ export const InventoryList: React.FC<InventoryListProps> = ({
                         {item.rackCodigo}
                       </td>
                       <td className="py-2.5 px-3 text-slate-600 text-[11px] whitespace-nowrap">
-                        {item.conexion}
+                        {item.sourceType === 'equipo' && equipmentOccupancyMap[item.id]?.totalCapacity > 0 ? (
+                          (() => {
+                            const occ = equipmentOccupancyMap[item.id];
+                            return (
+                              <div className="flex items-center gap-1.5">
+                                <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold border flex items-center gap-1 ${
+                                  occ.status === 'critico'
+                                    ? 'bg-rose-50 text-rose-800 border-rose-300'
+                                    : occ.status === 'alerta'
+                                    ? 'bg-amber-50 text-amber-800 border-amber-300'
+                                    : 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                                }`} title={`Estándar 75%: ${occ.statusLabel}. ${occ.recommendation}`}>
+                                  <span className={`w-1.5 h-1.5 rounded-full ${
+                                    occ.status === 'critico' ? 'bg-rose-500 animate-pulse' : occ.status === 'alerta' ? 'bg-amber-500' : 'bg-emerald-500'
+                                  }`} />
+                                  <span>{occ.percentage}%</span>
+                                </span>
+                                <span className="text-[10px] text-slate-500 font-mono">({occ.occupiedCount}/{occ.totalCapacity})</span>
+                              </div>
+                            );
+                          })()
+                        ) : (
+                          item.conexion
+                        )}
                       </td>
                       <td className="py-2.5 px-3 text-slate-500 whitespace-nowrap">
                         {item.fechaCompra}
@@ -678,15 +743,28 @@ export const InventoryList: React.FC<InventoryListProps> = ({
                             </button>
                           </div>
                         ) : (
-                          <button
-                            onClick={() => {
-                              const eq = item.rawItem as Equipo;
-                              if (eq.rack_id) onSelectRack(eq.rack_id);
-                            }}
-                            className="text-blue-600 hover:text-blue-800 font-semibold text-[11px] hover:underline"
-                          >
-                            Ver Rack
-                          </button>
+                          <div className="flex items-center justify-end gap-2">
+                            {(item.tipo === 'switch' || item.tipo === 'patch_panel' || item.tipo === 'nvr') && (
+                              <button
+                                onClick={() => setSelectedConnectedEquipo(item.rawItem as Equipo)}
+                                className="text-indigo-600 hover:text-indigo-800 font-semibold text-[11px] hover:underline flex items-center gap-1"
+                                title="Ver qué dispositivos están conectados a este equipo"
+                              >
+                                <Network className="w-3 h-3" />
+                                <span>Conectados</span>
+                              </button>
+                            )}
+                            <span className="text-slate-300">|</span>
+                            <button
+                              onClick={() => {
+                                const eq = item.rawItem as Equipo;
+                                if (eq.rack_id) onSelectRack(eq.rack_id);
+                              }}
+                              className="text-blue-600 hover:text-blue-800 font-semibold text-[11px] hover:underline"
+                            >
+                              Ver Rack
+                            </button>
+                          </div>
                         )}
                       </td>
                     </tr>
@@ -736,6 +814,218 @@ export const InventoryList: React.FC<InventoryListProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Modal de Dispositivos Conectados y Análisis de Ocupación 75% */}
+      {selectedConnectedEquipo && (() => {
+        const occ = equipmentOccupancyMap[selectedConnectedEquipo.id];
+        const rack = selectedConnectedEquipo.rack_id ? racksMap.get(selectedConnectedEquipo.rack_id) : undefined;
+        return (
+          <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white rounded-xl shadow-2xl border border-slate-200 max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+              {/* Modal Header */}
+              <div className="p-4 bg-slate-900 text-white flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-slate-800 rounded-lg border border-slate-700">
+                    {selectedConnectedEquipo.tipo === 'switch' ? (
+                      <Cpu className="w-5 h-5 text-emerald-400" />
+                    ) : selectedConnectedEquipo.tipo === 'patch_panel' ? (
+                      <Cable className="w-5 h-5 text-blue-400" />
+                    ) : (
+                      <HardDrive className="w-5 h-5 text-amber-400" />
+                    )}
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-bold text-base text-white">
+                        {selectedConnectedEquipo.codigo}
+                      </span>
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase bg-slate-800 text-slate-300 border border-slate-700">
+                        {selectedConnectedEquipo.tipo === 'switch' ? 'SWITCH POE' : selectedConnectedEquipo.tipo === 'patch_panel' ? 'PATCH PANEL' : 'NVR CCTV'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-400 font-mono mt-0.5">
+                      {selectedConnectedEquipo.marca || ''} {selectedConnectedEquipo.modelo || ''} {rack ? `· Rack ${rack.codigo}` : '· Sin Rack'} {selectedConnectedEquipo.ip_gestion ? `· IP ${selectedConnectedEquipo.ip_gestion}` : ''}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedConnectedEquipo(null)}
+                  className="p-1.5 text-slate-400 hover:text-white rounded hover:bg-slate-800 transition-colors cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Modal Content */}
+              <div className="p-5 overflow-y-auto space-y-4 font-mono text-xs">
+                {/* Standard 75% Occupancy Card */}
+                {occ && occ.totalCapacity > 0 && (
+                  <div className={`p-3.5 rounded-lg border ${
+                    occ.status === 'critico'
+                      ? 'bg-rose-50/90 border-rose-300 text-rose-950'
+                      : occ.status === 'alerta'
+                      ? 'bg-amber-50/90 border-amber-300 text-amber-950'
+                      : 'bg-emerald-50/90 border-emerald-300 text-emerald-950'
+                  }`}>
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <div className="flex items-center gap-2 font-bold">
+                        {occ.status === 'critico' ? (
+                          <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                        ) : occ.status === 'alerta' ? (
+                          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                        ) : (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        )}
+                        <span className="text-xs uppercase font-bold tracking-wide">
+                          Estándar de Ocupación: {occ.percentage}%
+                        </span>
+                      </div>
+
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${
+                        occ.status === 'critico'
+                          ? 'bg-rose-100 text-rose-900 border-rose-300'
+                          : occ.status === 'alerta'
+                          ? 'bg-amber-100 text-amber-900 border-amber-300'
+                          : 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                      }`}>
+                        {occ.status === 'critico' ? '>=78% SATURADO' : occ.status === 'alerta' ? '74-77% UMBRAL 75%' : '<73% DISPONIBLE'}
+                      </span>
+                    </div>
+
+                    {/* Progress bar */}
+                    <div className="space-y-1 my-2">
+                      <div className="relative w-full h-3 bg-slate-200 rounded-full overflow-hidden">
+                        <div 
+                          className={`h-full transition-all duration-300 ${
+                            occ.status === 'critico' ? 'bg-rose-600' : occ.status === 'alerta' ? 'bg-amber-500' : 'bg-emerald-500'
+                          }`}
+                          style={{ width: `${Math.min(100, occ.percentage)}%` }}
+                        />
+                        <div 
+                          className="absolute top-0 bottom-0 w-0.5 bg-slate-900 z-10" 
+                          style={{ left: '75%' }} 
+                          title="Estándar Objetivo: 75%"
+                        />
+                      </div>
+                      <div className="flex justify-between items-center text-[10px] text-slate-500">
+                        <span>{occ.occupiedCount} ocupados ({occ.availableCount} libres)</span>
+                        <span className="font-semibold text-slate-800">Objetivo: 75% | Capacidad: {occ.totalCapacity}</span>
+                      </div>
+                    </div>
+
+                    {/* Directriz de inventario */}
+                    <div className="mt-2 pt-2 border-t border-slate-200 text-[11px] leading-relaxed">
+                      <p className="font-bold">
+                        {occ.status === 'critico' ? (
+                          <span className="text-rose-700">🚨 Directriz de Ampliación:</span>
+                        ) : occ.status === 'alerta' ? (
+                          <span className="text-amber-800">⚠️ Directriz Preventiva:</span>
+                        ) : (
+                          <span className="text-emerald-800">✅ Directriz Operativa:</span>
+                        )}
+                      </p>
+                      <p className="mt-0.5 text-slate-700 font-sans">
+                        {occ.recommendation}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* List of Connected Devices */}
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3.5 space-y-2">
+                  <div className="flex items-center justify-between pb-2 border-b border-slate-200">
+                    <span className="font-bold text-slate-800 uppercase flex items-center gap-1.5 text-xs">
+                      <Network className="w-4 h-4 text-blue-600" />
+                      Dispositivos Conectados ({occ ? occ.connectedCameras.length + occ.connectedUplinks.length : 0})
+                    </span>
+                    <span className="text-[10px] text-slate-500">
+                      Trazabilidad física extremo a extremo
+                    </span>
+                  </div>
+
+                  {(!occ || (occ.connectedCameras.length === 0 && occ.connectedUplinks.length === 0)) ? (
+                    <div className="py-8 text-center text-slate-400">
+                      <p className="text-xs">No hay cámaras ni enlaces conectados a este equipo actualmente.</p>
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-slate-200 max-h-60 overflow-y-auto pr-1 scrollbar-thin">
+                      {occ.connectedUplinks.map((up, idx) => (
+                        <div key={`modal-uplink-${idx}`} className="py-2 flex items-center justify-between text-xs">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded text-[10px] border border-amber-300">
+                              Puerto {up.portNum}
+                            </span>
+                            <span className="font-bold text-slate-900">Uplink NVR Troncal</span>
+                          </div>
+                          <span className="text-[11px] text-amber-700 font-bold">1 Gbps</span>
+                        </div>
+                      ))}
+
+                      {occ.connectedCameras.map((conn, idx) => (
+                        <div key={`modal-cam-${conn.camera.id}-${idx}`} className="py-2 flex items-center justify-between text-xs">
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <span className="font-bold text-blue-800 bg-blue-100 px-2 py-0.5 rounded text-[10px] border border-blue-200 shrink-0">
+                              {conn.portOrChannel}
+                            </span>
+                            <div className="min-w-0">
+                              <span className="font-bold text-slate-900 block truncate">
+                                {conn.camera.codigo}
+                              </span>
+                              <span className="text-[10px] text-slate-500 font-sans block truncate">
+                                {conn.camera.modelo || conn.camera.tipo_dispositivo || 'CCTV'} {conn.camera.direccion_ip ? `· IP ${conn.camera.direccion_ip}` : ''} {conn.camera.ubicacion_especifica ? `· ${conn.camera.ubicacion_especifica}` : ''}
+                              </span>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedConnectedEquipo(null);
+                              onSelectCamera(conn.camera);
+                            }}
+                            className="px-2.5 py-1 bg-white hover:bg-blue-50 text-blue-700 border border-blue-200 rounded text-[10px] font-semibold flex items-center gap-1 transition-colors shrink-0 ml-2 cursor-pointer"
+                          >
+                            <Camera className="w-3 h-3 text-blue-600" />
+                            <span>Ver Ficha</span>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-xs">
+                {selectedConnectedEquipo.rack_id ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const rId = selectedConnectedEquipo.rack_id;
+                      setSelectedConnectedEquipo(null);
+                      if (rId) onSelectRack(rId);
+                    }}
+                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded font-semibold text-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Server className="w-3.5 h-3.5" />
+                    <span>Ver en Elevación de Rack</span>
+                  </button>
+                ) : <div />}
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedConnectedEquipo(null)}
+                  className="px-4 py-1.5 border border-slate-300 hover:bg-slate-100 text-slate-700 rounded font-semibold text-xs transition-colors cursor-pointer"
+                >
+                  Cerrar
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };

@@ -13,7 +13,8 @@ import {
   Archive,
   Menu,
   X,
-  ChevronRight
+  ChevronRight,
+  BarChart3
 } from 'lucide-react';
 
 export type NavView = 
@@ -25,6 +26,7 @@ export type NavView =
   | 'mantenimiento' 
   | 'inventario' 
   | 'planimetria'
+  | 'reportes'
   | 'bodega_bajas'
   | 'sin_asignar'
   | 'catalogos';
@@ -97,6 +99,7 @@ export const Header: React.FC<HeaderProps> = ({
     { id: 'registro', label: 'Registro Terreno', icon: <PlusCircle className="w-3.5 h-3.5" /> },
     { id: 'mantenimiento', label: 'Bitácora / Mantención', icon: <Wrench className="w-3.5 h-3.5" /> },
     { id: 'inventario', label: 'Inventario General', icon: <ListFilter className="w-3.5 h-3.5" /> },
+    { id: 'reportes', label: 'Reportes & Ocupación', icon: <BarChart3 className="w-3.5 h-3.5" /> },
     { id: 'planimetria', label: 'Planimetría FOV', icon: <MapPin className="w-3.5 h-3.5" /> },
     { 
       id: 'bodega_bajas', 
@@ -146,6 +149,7 @@ export const Header: React.FC<HeaderProps> = ({
       case 'registro': return 'Levantamiento y Registro Rápido en Terreno (Norma TIA-606-C)';
       case 'mantenimiento': return 'Bitácora Técnica e Historial de Intervenciones';
       case 'inventario': return 'Inventario General Centralizado de Equipamiento';
+      case 'reportes': return 'Módulo de Reportes · Capacidad, Ocupación y Expansión de Inventario (Norma 75%)';
       case 'planimetria': return 'Planimetría CAD y Análisis Geométrico de Cobertura';
       case 'bodega_bajas': return 'Bodega / Bajas (Equipos y Cámaras Retirados de Servicio)';
       case 'sin_asignar': return 'Bandeja de Dispositivos Sin Asignación Jerárquica';
@@ -252,7 +256,7 @@ export const Header: React.FC<HeaderProps> = ({
                 Módulos de Sistema
               </span>
               <span className="text-[10px] font-mono text-slate-400">
-                11 Vistas disponibles
+                12 Vistas disponibles
               </span>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">

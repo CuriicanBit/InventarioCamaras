@@ -14,7 +14,10 @@ import {
   ChevronLeft,
   ArrowDownToLine,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  Cable,
+  AlignJustify,
+  Boxes
 } from 'lucide-react';
 import { Equipo, TipoEquipo } from '../types/database';
 import { inferUHeight, findFirstAvailableUSlot } from '../utils/rackUnits';
@@ -55,18 +58,68 @@ export const RackBodegaDrawer: React.FC<RackBodegaDrawerProps> = ({
   const getTipoIcon = (tipo: TipoEquipo | string) => {
     switch (tipo) {
       case 'switch':
-        return <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shrink-0" />;
+        return <Network className="w-3.5 h-3.5 text-blue-500 shrink-0" />;
       case 'patch_panel':
-        return <Cpu className="w-3.5 h-3.5 text-slate-500 shrink-0" />;
+        return <Cable className="w-3.5 h-3.5 text-emerald-600 shrink-0" />;
       case 'nvr':
+      case 'dvr':
         return <HardDrive className="w-3.5 h-3.5 text-indigo-500 shrink-0" />;
       case 'ups':
         return <Zap className="w-3.5 h-3.5 text-amber-500 shrink-0" />;
+      case 'organizador':
+        return <AlignJustify className="w-3.5 h-3.5 text-slate-500 shrink-0" />;
       case 'mufa':
-        return <Network className="w-3.5 h-3.5 text-cyan-500 shrink-0" />;
+        return <Boxes className="w-3.5 h-3.5 text-cyan-600 shrink-0" />;
       default:
         return <Server className="w-3.5 h-3.5 text-slate-500 shrink-0" />;
     }
+  };
+
+  const getTipoEquipoLabel = (tipo: string): string => {
+    switch (tipo?.toLowerCase()) {
+      case 'switch':
+        return 'Switch';
+      case 'patch_panel':
+        return 'Patch Panel';
+      case 'nvr':
+        return 'NVR';
+      case 'dvr':
+        return 'DVR';
+      case 'ups':
+        return 'UPS';
+      case 'organizador':
+        return 'Organizador';
+      case 'mufa':
+        return 'Mufa';
+      case 'servidor':
+        return 'Servidor';
+      case 'pdu':
+        return 'PDU';
+      case 'router':
+        return 'Router';
+      case 'otro':
+        return 'Dispositivo';
+      default:
+        return tipo ? tipo.charAt(0).toUpperCase() + tipo.slice(1).replace(/_/g, ' ') : 'Dispositivo';
+    }
+  };
+
+  const getCapacidadLabel = (eq: Equipo): string | null => {
+    const parts: string[] = [];
+    const p = eq.puertos_totales;
+    const c = eq.canales_totales;
+
+    if (p !== null && p !== undefined && Number(p) > 0) {
+      const numP = Number(p);
+      parts.push(`${numP} ${numP === 1 ? 'puerto' : 'puertos'}`);
+    }
+
+    if (c !== null && c !== undefined && Number(c) > 0) {
+      const numC = Number(c);
+      parts.push(`${numC} ${numC === 1 ? 'canal' : 'canales'}`);
+    }
+
+    return parts.length > 0 ? `(${parts.join(' / ')})` : null;
   };
 
   const filteredEquipos = bodegaEquipos.filter(eq => {
@@ -228,13 +281,18 @@ export const RackBodegaDrawer: React.FC<RackBodegaDrawerProps> = ({
                       <GripVertical className="w-4 h-4" />
                     </div>
                     {getTipoIcon(eq.tipo)}
-                    <div className="truncate">
-                      <span className="font-bold text-slate-900 group-hover:text-blue-700">
+                    <div className="flex items-center gap-1.5 truncate">
+                      <span className="font-bold text-slate-900 group-hover:text-blue-700 text-xs">
+                        {getTipoEquipoLabel(eq.tipo)}
+                      </span>
+                      <span className="font-semibold text-slate-700 text-xs font-mono">
                         {eq.codigo}
                       </span>
-                      <span className="ml-1.5 text-[10px] text-slate-500 uppercase font-sans">
-                        {eq.tipo}
-                      </span>
+                      {getCapacidadLabel(eq) && (
+                        <span className="text-[10px] text-blue-700 font-mono font-medium">
+                          {getCapacidadLabel(eq)}
+                        </span>
+                      )}
                     </div>
                   </div>
 

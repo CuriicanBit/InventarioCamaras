@@ -11,6 +11,7 @@ import { FloorPlanCoverage } from './components/FloorPlanCoverage';
 import { UnassignedItems } from './components/UnassignedItems';
 import { CatalogsView } from './components/CatalogsView';
 import { WarehouseView } from './components/WarehouseView';
+import { ReportsView } from './components/ReportsView';
 import { supabase } from './lib/supabase';
 import { Rack, Camara, Equipo } from './types/database';
 
@@ -244,6 +245,23 @@ export default function App() {
             onSelectRack={handleNavigateToRackById}
             onNavigateToRegistration={() => setCurrentView('registro')}
             onNavigateToMaintenance={handleNavigateToMaintenance}
+          />
+        )}
+
+        {currentView === 'reportes' && (
+          <ReportsView
+            onSelectRack={(rk) => {
+              setSelectedRack(rk);
+              setCurrentView('elevacion');
+            }}
+            onNavigateToPorts={(eqId) => {
+              if (eqId) setSelectedEquipmentId(eqId);
+              setCurrentView('puertos');
+            }}
+            onSelectCamera={(cam) => {
+              setSelectedCamera(cam);
+              setCurrentView('camara');
+            }}
           />
         )}
 

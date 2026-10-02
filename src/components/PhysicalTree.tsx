@@ -889,11 +889,15 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
                         rackEquipos.map((eq) => (
                           <tr key={eq.id} className="hover:bg-slate-50">
                             <td className="py-2 px-3 font-bold text-blue-700">
-                              {eq.posicion_u_inicio && eq.posicion_u_fin
-                                ? `U${eq.posicion_u_inicio}-U${eq.posicion_u_fin}`
-                                : eq.posicion_u_inicio
+                              {eq.posicion_u_inicio && eq.posicion_u_inicio > 0 && eq.posicion_u_fin && eq.posicion_u_fin > 0
+                                ? (eq.posicion_u_inicio === eq.posicion_u_fin ? `U${eq.posicion_u_inicio}` : `U${eq.posicion_u_inicio}-U${eq.posicion_u_fin}`)
+                                : eq.posicion_u_inicio && eq.posicion_u_inicio > 0
                                 ? `U${eq.posicion_u_inicio}`
-                                : 'N/A'}
+                                : (
+                                  <span className="text-amber-800 font-semibold text-[10px] bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded inline-block">
+                                    Piso / Shaft
+                                  </span>
+                                )}
                             </td>
                             <td className="py-2 px-3 capitalize text-slate-700">{eq.tipo.replace('_', ' ')}</td>
                             <td className="py-2 px-3 font-semibold text-slate-900">{eq.codigo}</td>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Server, 
   Cpu, 
@@ -23,10 +23,22 @@ import {
   ArrowDownToLine,
   Layers,
   ChevronRight,
-  Sparkles
+  Sparkles,
+  Cable,
+  AlignJustify,
+  Boxes,
+  Power,
+  Router,
+  Disc,
+  Info,
+  ArrowRight,
+  Camera,
+  BarChart3,
+  AlertTriangle
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Rack, Equipo, Proveedor, Marca, Modelo, TipoEquipo } from '../types/database';
+import { Rack, Equipo, Proveedor, Marca, Modelo, TipoEquipo, Camara } from '../types/database';
+import { calculateEquipmentOccupancy, EquipmentOccupancyInfo } from '../utils/occupancyAlerts';
 import { MarcaSelect, ModeloSelect, ProveedorSelect } from './catalogs/CatalogSelectors';
 import { DecommissionModal } from './DecommissionModal';
 import { DeleteConfirmModal } from './DeleteConfirmModal';
@@ -51,6 +63,8 @@ export const RackElevation: React.FC<RackElevationProps> = ({
   onNavigateToPorts,
 }) => {
   const [equipos, setEquipos] = useState<Equipo[]>([]);
+  const [camaras, setCamaras] = useState<Camara[]>([]);
+  const [nvrUplinks, setNvrUplinks] = useState<Record<string, any>>({});
   const [bodegaEquipos, setBodegaEquipos] = useState<Equipo[]>([]);
   const [loadingBodega, setLoadingBodega] = useState(false);
   const [proveedores, setProveedores] = useState<Proveedor[]>([]);
@@ -115,6 +129,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     fecha_instalacion: string;
     proveedor_compra_id: string | null;
     proveedor_instalacion_id: string | null;
+    es_rackeable?: boolean;
   }>({
     rack_id: rack.id,
     tipo: 'switch',
@@ -135,15 +150,24 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     fecha_instalacion: '',
     proveedor_compra_id: null,
     proveedor_instalacion_id: null,
+    es_rackeable: true,
   });
   const [saving, setSaving] = useState(false);
 
   const totalU = rack.altura_u || 42;
 
-  // Occupied slots map: key is U number (1..totalU), value is Equipo
+  // Equipos montados en el bastidor (ocupan unidades 1U..totalU)
+  const rackMountedEquipos = equipos.filter(eq => Boolean(eq.posicion_u_inicio && eq.posicion_u_inicio > 0));
+
+  // Equipos de piso / shaft adyacente (No rackeables, ej: UPS Torre en piso de shaft al lado del rack)
+  const adjacentFloorEquipos = equipos.filter(
+    eq => !eq.posicion_u_inicio || eq.posicion_u_inicio === 0 || eq.u_range === 'Piso / Shaft'
+  );
+
+  // Occupied slots map: key is U number (1..totalU), value is Equipo montado
   const occupiedSlotsMap: Record<number, Equipo> = {};
-  equipos.forEach(eq => {
-    if (eq.posicion_u_inicio) {
+  rackMountedEquipos.forEach(eq => {
+    if (eq.posicion_u_inicio && eq.posicion_u_inicio > 0) {
       const uStart = Math.min(eq.posicion_u_inicio, eq.posicion_u_fin || eq.posicion_u_inicio);
       const uEnd = Math.max(eq.posicion_u_inicio, eq.posicion_u_fin || eq.posicion_u_inicio);
       for (let u = uStart; u <= uEnd; u++) {
@@ -181,7 +205,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     }
   };
 
-  // Load rack equipment, providers, brands, models, and bodega
+  // Load rack equipment, providers, brands, models, cameras, and bodega
   const loadData = async () => {
     try {
       setLoading(true);
@@ -189,7 +213,8 @@ export const RackElevation: React.FC<RackElevationProps> = ({
         { data: eqData },
         { data: provData },
         { data: marcasData },
-        { data: modelosData }
+        { data: modelosData },
+        { data: camData }
       ] = await Promise.all([
         supabase
           .from('equipos')
@@ -199,6 +224,10 @@ export const RackElevation: React.FC<RackElevationProps> = ({
         supabase.from('proveedores').select('*').order('nombre'),
         supabase.from('marcas').select('*').order('nombre'),
         supabase.from('modelos').select('*').order('nombre'),
+        supabase
+          .from('camaras')
+          .select('*, patch_panel:equipos!patch_panel_id(*), switch:equipos!switch_id(*), nvr:equipos!nvr_id(*)')
+          .or('estado_ciclo_vida.is.null,estado_ciclo_vida.eq.instalado')
       ]);
 
       const loadedEquipos = (eqData || []).filter(
@@ -208,6 +237,14 @@ export const RackElevation: React.FC<RackElevationProps> = ({
       setProveedores(provData || []);
       setMarcas(marcasData || []);
       setModelos(modelosData || []);
+      setCamaras(camData || []);
+
+      try {
+        const savedUplinks = localStorage.getItem('cctv_nvr_uplinks');
+        if (savedUplinks) setNvrUplinks(JSON.parse(savedUplinks));
+      } catch (e) {
+        console.error('Error reading nvr uplinks:', e);
+      }
 
       // Auto-select first active switch or first device
       if (loadedEquipos.length > 0) {
@@ -228,6 +265,15 @@ export const RackElevation: React.FC<RackElevationProps> = ({
   useEffect(() => {
     loadData();
   }, [rack.id]);
+
+  // Mapa reactivo de ocupación y estándar de alerta 75% para cada equipo
+  const equipmentOccupancyMap = useMemo(() => {
+    const map: Record<string, EquipmentOccupancyInfo> = {};
+    equipos.forEach(eq => {
+      map[eq.id] = calculateEquipmentOccupancy(eq, camaras, nvrUplinks);
+    });
+    return map;
+  }, [equipos, camaras, nvrUplinks]);
 
   // Montar equipo desde Bodega al Rack
   const handleMountFromBodega = async (eq: Equipo, targetUSuperior: number, uHeight: number) => {
@@ -398,34 +444,37 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     setDragOverTarget(null);
   };
 
-  // Open modal to add equipment
-  const handleOpenAddModal = () => {
+  // Open modal to add equipment (supports standard rack equipment or floor/shaft non-rackeable equipment like tower UPS)
+  const handleOpenAddModal = (options?: { isNonRackeable?: boolean; tipo?: TipoEquipo }) => {
     setIsEditing(false);
     setModoAvanzadoU(false);
-    const initialHeight = 1;
-    const firstFreeSlot = findFirstAvailableUSlot(totalU, initialHeight, occupiedSlotsMap) || totalU;
-    setFormAlturaU(initialHeight);
+    const isNonRackeable = Boolean(options?.isNonRackeable);
+    const tipo = options?.tipo || (isNonRackeable ? 'ups' : 'switch');
+    const initialHeight = isNonRackeable ? 0 : 1;
+    const firstFreeSlot = isNonRackeable ? 0 : (findFirstAvailableUSlot(totalU, 1, occupiedSlotsMap) || totalU);
+    setFormAlturaU(initialHeight || 1);
 
     setFormData({
       rack_id: rack.id,
-      tipo: 'switch',
+      tipo: tipo,
       codigo: '',
       marca_id: null,
       modelo_id: null,
       marca: null,
       modelo: null,
       numero_serie: '',
-      posicion_u_inicio: calculateUInferior(firstFreeSlot, initialHeight),
-      posicion_u_fin: firstFreeSlot,
+      posicion_u_inicio: isNonRackeable ? 0 : calculateUInferior(firstFreeSlot, 1),
+      posicion_u_fin: isNonRackeable ? 0 : firstFreeSlot,
       ip_gestion: '',
       vlan: '',
       puertos_totales: '',
       canales_totales: '',
-      capacidad_va: '',
+      capacidad_va: tipo === 'ups' ? '1500' : '',
       fecha_compra: '',
-      fecha_instalacion: '',
+      fecha_instalacion: new Date().toISOString().split('T')[0],
       proveedor_compra_id: null,
       proveedor_instalacion_id: null,
+      es_rackeable: !isNonRackeable,
     });
     setIsModalOpen(true);
   };
@@ -437,10 +486,11 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     const matchedBrand = marcas.find(m => m.id === eq.marca_id || m.nombre === eq.marca);
     const matchedModel = modelos.find(m => m.id === eq.modelo_id || m.nombre === eq.modelo);
 
-    const uStart = Math.min(eq.posicion_u_inicio || 1, eq.posicion_u_fin || eq.posicion_u_inicio || 1);
-    const uEnd = Math.max(eq.posicion_u_inicio || 1, eq.posicion_u_fin || eq.posicion_u_inicio || 1);
-    const currentHeight = uEnd - uStart + 1;
-    setFormAlturaU(currentHeight);
+    const isNonRack = !eq.posicion_u_inicio || eq.posicion_u_inicio === 0 || eq.u_range === 'Piso / Shaft';
+    const uStart = isNonRack ? 0 : (eq.posicion_u_inicio || 1);
+    const uEnd = isNonRack ? 0 : (eq.posicion_u_fin || uStart);
+    const currentHeight = isNonRack ? 0 : (uEnd - uStart + 1);
+    setFormAlturaU(currentHeight || 1);
 
     setFormData({
       id: eq.id,
@@ -459,10 +509,11 @@ export const RackElevation: React.FC<RackElevationProps> = ({
       puertos_totales: eq.puertos_totales !== null && eq.puertos_totales !== undefined ? String(eq.puertos_totales) : '',
       canales_totales: eq.canales_totales !== null && eq.canales_totales !== undefined ? String(eq.canales_totales) : '',
       capacidad_va: eq.capacidad_va !== null && eq.capacidad_va !== undefined ? String(eq.capacidad_va) : '',
-      fecha_compra: eq.fecha_compra || '',
-      fecha_instalacion: eq.fecha_instalacion || '',
+      fecha_compra: eq.fecha_compra ? eq.fecha_compra.split('T')[0] : '',
+      fecha_instalacion: eq.fecha_instalacion ? eq.fecha_instalacion.split('T')[0] : '',
       proveedor_compra_id: eq.proveedor_compra_id || null,
       proveedor_instalacion_id: eq.proveedor_instalacion_id || null,
+      es_rackeable: !isNonRack,
     });
     setIsModalOpen(true);
   };
@@ -510,19 +561,23 @@ export const RackElevation: React.FC<RackElevationProps> = ({
   const handleSaveEquipment = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    const uSup = Number(formData.posicion_u_fin || totalU);
-    const uInf = Number(formData.posicion_u_inicio || 1);
-    const validation = validateUSlotAvailability(
-      Math.max(uSup, uInf),
-      Math.abs(uSup - uInf) + 1,
-      totalU,
-      occupiedSlotsMap,
-      isEditing ? formData.id : null
-    );
+    const isNonRackeable = formData.es_rackeable === false;
 
-    if (!validation.isValid) {
-      alert(`No se puede guardar: ${validation.reason}. Seleccione una ubicación disponible.`);
-      return;
+    if (!isNonRackeable) {
+      const uSup = Number(formData.posicion_u_fin || totalU);
+      const uInf = Number(formData.posicion_u_inicio || 1);
+      const validation = validateUSlotAvailability(
+        Math.max(uSup, uInf),
+        Math.abs(uSup - uInf) + 1,
+        totalU,
+        occupiedSlotsMap,
+        isEditing ? formData.id : null
+      );
+
+      if (!validation.isValid) {
+        alert(`No se puede guardar: ${validation.reason}. Seleccione una ubicación disponible.`);
+        return;
+      }
     }
 
     try {
@@ -531,6 +586,9 @@ export const RackElevation: React.FC<RackElevationProps> = ({
       const isPatchPanel = formData.tipo === 'patch_panel';
       const isNvr = formData.tipo === 'nvr';
       const isUps = formData.tipo === 'ups';
+
+      const uSup = isNonRackeable ? null : Number(formData.posicion_u_fin || totalU);
+      const uInf = isNonRackeable ? null : Number(formData.posicion_u_inicio || 1);
 
       const payload: any = {
         rack_id: rack.id,
@@ -541,8 +599,9 @@ export const RackElevation: React.FC<RackElevationProps> = ({
         marca: formData.marca || null,
         modelo: formData.modelo || null,
         numero_serie: formData.numero_serie.trim() || null,
-        posicion_u_inicio: Math.min(uInf, uSup),
-        posicion_u_fin: Math.max(uInf, uSup),
+        posicion_u_inicio: isNonRackeable ? null : Math.min(uInf!, uSup!),
+        posicion_u_fin: isNonRackeable ? null : Math.max(uInf!, uSup!),
+        u_range: isNonRackeable ? 'Piso / Shaft' : null,
         fecha_compra: formData.fecha_compra.trim() || null,
         fecha_instalacion: formData.fecha_instalacion.trim() || null,
         proveedor_compra_id: formData.proveedor_compra_id || null,
@@ -582,7 +641,9 @@ export const RackElevation: React.FC<RackElevationProps> = ({
         if (error) throw error;
         setEquipos(prev => [data, ...prev].sort((a, b) => (b.posicion_u_inicio || 0) - (a.posicion_u_inicio || 0)));
         setSelectedEquipo(data);
-        showToast(`Equipo ${data.codigo} montado en rack exitosamente`);
+        showToast(isNonRackeable 
+          ? `Equipo ${data.codigo} asociado al piso/shaft adyacente exitosamente`
+          : `Equipo ${data.codigo} montado en rack exitosamente`);
       }
       setIsModalOpen(false);
     } catch (err: any) {
@@ -608,6 +669,90 @@ export const RackElevation: React.FC<RackElevationProps> = ({
       console.error('Error deleting equipment:', err);
       alert('Error al eliminar equipo');
     }
+  };
+
+  // Helpers for equipment icon, type label, and capacity in rack elevation faceplates
+  const getEquipmentIcon = (tipo: string, isSelected: boolean, isPassiveOrPP: boolean) => {
+    const iconColor = (darkColor: string, lightColor: string) => {
+      if (isSelected) return 'text-white';
+      return isPassiveOrPP ? lightColor : darkColor;
+    };
+
+    switch (tipo?.toLowerCase()) {
+      case 'switch':
+        return <Network className={`w-4 h-4 shrink-0 ${iconColor('text-blue-400', 'text-blue-600')}`} />;
+      case 'patch_panel':
+        return <Cable className={`w-4 h-4 shrink-0 ${iconColor('text-emerald-400', 'text-slate-700')}`} />;
+      case 'nvr':
+        return <HardDrive className={`w-4 h-4 shrink-0 ${iconColor('text-indigo-400', 'text-indigo-600')}`} />;
+      case 'dvr':
+        return <Disc className={`w-4 h-4 shrink-0 ${iconColor('text-rose-400', 'text-rose-600')}`} />;
+      case 'ups':
+        return <Zap className={`w-4 h-4 shrink-0 ${iconColor('text-amber-400', 'text-amber-600')}`} />;
+      case 'organizador':
+        return <AlignJustify className={`w-4 h-4 shrink-0 ${iconColor('text-slate-300', 'text-slate-600')}`} />;
+      case 'mufa':
+        return <Boxes className={`w-4 h-4 shrink-0 ${iconColor('text-cyan-400', 'text-cyan-600')}`} />;
+      case 'servidor':
+        return <Server className={`w-4 h-4 shrink-0 ${iconColor('text-purple-400', 'text-purple-600')}`} />;
+      case 'pdu':
+        return <Power className={`w-4 h-4 shrink-0 ${iconColor('text-orange-400', 'text-orange-600')}`} />;
+      case 'router':
+        return <Router className={`w-4 h-4 shrink-0 ${iconColor('text-sky-400', 'text-sky-600')}`} />;
+      case 'bandeja':
+        return <Layers className={`w-4 h-4 shrink-0 ${iconColor('text-teal-400', 'text-teal-600')}`} />;
+      default:
+        return <Cpu className={`w-4 h-4 shrink-0 ${iconColor('text-slate-400', 'text-slate-600')}`} />;
+    }
+  };
+
+  const getTipoEquipoLabel = (tipo: string): string => {
+    switch (tipo?.toLowerCase()) {
+      case 'switch':
+        return 'Switch';
+      case 'patch_panel':
+        return 'Patch Panel';
+      case 'nvr':
+        return 'NVR';
+      case 'dvr':
+        return 'DVR';
+      case 'ups':
+        return 'UPS';
+      case 'organizador':
+        return 'Organizador';
+      case 'mufa':
+        return 'Mufa';
+      case 'servidor':
+        return 'Servidor';
+      case 'pdu':
+        return 'PDU';
+      case 'router':
+        return 'Router';
+      case 'bandeja':
+        return 'Bandeja';
+      case 'otro':
+        return 'Dispositivo';
+      default:
+        return tipo ? tipo.charAt(0).toUpperCase() + tipo.slice(1).replace(/_/g, ' ') : 'Dispositivo';
+    }
+  };
+
+  const getCapacidadLabel = (eq: Equipo): string | null => {
+    const parts: string[] = [];
+    const p = eq.puertos_totales ?? eq.modelo_rel?.puertos_default;
+    const c = eq.canales_totales ?? eq.modelo_rel?.canales_default;
+
+    if (p !== null && p !== undefined && Number(p) > 0) {
+      const numP = Number(p);
+      parts.push(`${numP} ${numP === 1 ? 'puerto' : 'puertos'}`);
+    }
+
+    if (c !== null && c !== undefined && Number(c) > 0) {
+      const numC = Number(c);
+      parts.push(`${numC} ${numC === 1 ? 'canal' : 'canales'}`);
+    }
+
+    return parts.length > 0 ? `(${parts.join(' / ')})` : null;
   };
 
   // Render the rack elevation rows from totalU down to 1
@@ -670,6 +815,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
 
         const isPassiveOrPP = eq.tipo === 'patch_panel';
         const textColor = isPassiveOrPP && !isSelected ? 'text-slate-800' : 'text-white';
+        const capacidadStr = getCapacidadLabel(eq);
 
         const equipmentTopU = uEnd;
         rows.push(
@@ -719,30 +865,67 @@ export const RackElevation: React.FC<RackElevationProps> = ({
 
             {/* Equipment Faceplate */}
             <div className="flex-1 px-3 py-1 flex items-center justify-between overflow-hidden">
-              <div className="flex items-center gap-2 overflow-hidden">
+              <div className="flex items-center gap-2.5 overflow-hidden">
                 <div 
                   className="text-slate-400 group-hover:text-amber-400 cursor-grab shrink-0" 
                   title="Arrastrar para mover verticalmente o a Bodega"
                 >
                   <GripVertical className="w-4 h-4" />
                 </div>
-                {eq.tipo === 'switch' && <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0 shadow-xs" />}
-                {eq.tipo === 'nvr' && <HardDrive className="w-3.5 h-3.5 text-indigo-400 shrink-0" />}
-                {eq.tipo === 'ups' && <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
-                {eq.tipo === 'mufa' && <Network className="w-3.5 h-3.5 text-cyan-400 shrink-0" />}
+
+                {/* Ícono identificativo para cada dispositivo */}
+                {getEquipmentIcon(eq.tipo, isSelected, isPassiveOrPP)}
                 
-                <div className="truncate">
-                  <span className={`font-semibold ${textColor}`}>
-                    {eq.marca_rel?.nombre || eq.marca ? `${eq.marca_rel?.nombre || eq.marca} ` : ''}{eq.modelo_rel?.nombre || eq.modelo || eq.codigo}
+                {/* Tipo de dispositivo, Código y Puertos/Canales entre paréntesis */}
+                <div className="flex items-center gap-2 truncate">
+                  <span className={`font-bold tracking-tight text-xs shrink-0 ${textColor}`}>
+                    {getTipoEquipoLabel(eq.tipo)}
                   </span>
-                  <span className={`ml-2 text-[10px] opacity-80 ${textColor}`}>
-                    ({eq.codigo}) {eq.puertos_totales ? `${eq.puertos_totales}P` : ''}
+                  <span className={`font-semibold text-xs font-mono shrink-0 ${textColor}`}>
+                    {eq.codigo}
                   </span>
+                  {capacidadStr && (
+                    <span className={`text-[11px] font-mono shrink-0 ${
+                      isSelected 
+                        ? 'text-blue-100 font-semibold' 
+                        : (isPassiveOrPP ? 'text-blue-700 font-semibold' : 'text-blue-300 font-medium')
+                    }`}>
+                      {capacidadStr}
+                    </span>
+                  )}
                 </div>
               </div>
 
               {/* Badges / Bay visuals */}
               <div className="flex items-center gap-2 shrink-0">
+                {/* Ocupación con alerta estándar 75% (<73% Verde, 74-77% Amarillo, >=78% Rojo) */}
+                {(() => {
+                  const occ = equipmentOccupancyMap[eq.id];
+                  if (!occ || occ.totalCapacity <= 0) return null;
+                  return (
+                    <div 
+                      className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold flex items-center gap-1.5 border shadow-2xs ${
+                        occ.status === 'critico'
+                          ? 'bg-rose-950/90 text-rose-100 border-rose-500/80 animate-pulse'
+                          : occ.status === 'alerta'
+                          ? 'bg-amber-950/90 text-amber-100 border-amber-500/80'
+                          : 'bg-emerald-950/90 text-emerald-200 border-emerald-600/80'
+                      }`}
+                      title={`Ocupación: ${occ.occupiedCount}/${occ.totalCapacity} (${occ.percentage}%). Estándar 75%: ${occ.statusLabel}. ${occ.recommendation}`}
+                    >
+                      <span className={`w-1.5 h-1.5 rounded-full ${
+                        occ.status === 'critico' 
+                          ? 'bg-rose-400' 
+                          : occ.status === 'alerta' 
+                          ? 'bg-amber-400' 
+                          : 'bg-emerald-400'
+                      }`} />
+                      <span>{occ.percentage}%</span>
+                      <span className="hidden sm:inline text-[9px] opacity-80">({occ.occupiedCount}/{occ.totalCapacity})</span>
+                    </div>
+                  );
+                })()}
+
                 <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded uppercase font-semibold ${badgeColor}`}>
                   {isSelected ? 'SELECCIONADO' : `${uHeight}U`}
                 </span>
@@ -939,8 +1122,19 @@ export const RackElevation: React.FC<RackElevationProps> = ({
             <span>Cajón Bodega ({bodegaEquipos.length})</span>
           </button>
 
+          {/* Botón de acceso directo para UPS Torre / Equipo No Rackeable */}
+          <button
+            type="button"
+            onClick={() => handleOpenAddModal({ isNonRackeable: true, tipo: 'ups' })}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded transition-colors shadow-2xs"
+            title="Registrar una UPS formato torre u otro equipo en el piso del shaft al lado del bastidor"
+          >
+            <Zap className="w-4 h-4 text-amber-600" />
+            <span>+ UPS Torre / Shaft</span>
+          </button>
+
           <button 
-            onClick={handleOpenAddModal}
+            onClick={() => handleOpenAddModal({ isNonRackeable: false })}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors shadow-xs"
           >
             <Plus className="w-4 h-4" />
@@ -1034,6 +1228,115 @@ export const RackElevation: React.FC<RackElevationProps> = ({
             <div className="bg-slate-800 text-slate-400 py-1 px-3 rounded-b border-t border-slate-700 text-center text-[9px] font-mono tracking-widest uppercase mt-0.5">
               ZÓCALO / BANDEJA PASAMUROS INFERIOR
             </div>
+
+            {/* SECCIÓN PISO DEL SHAFT / EQUIPAMIENTO ADYACENTE NO RACKEABLE (ej. UPS TORRE) */}
+            <div className="mt-3 pt-3 border-t border-slate-700">
+              <div className="flex items-center justify-between mb-2 px-1">
+                <div className="flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                  <span className="text-[11px] font-mono font-bold tracking-wide uppercase text-amber-300 flex items-center gap-1.5">
+                    <Zap className="w-3.5 h-3.5 text-amber-400" />
+                    Piso del Shaft · Equipamiento Adyacente (No Rackeable)
+                  </span>
+                  <span className="text-[9px] font-mono bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded border border-slate-700">
+                    0U · Al lado del bastidor
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleOpenAddModal({ isNonRackeable: true, tipo: 'ups' })}
+                  className="text-[10px] font-mono text-amber-300 hover:text-amber-200 flex items-center gap-1 bg-amber-950/60 hover:bg-amber-950 px-2 py-0.5 rounded border border-amber-800/80 transition-colors"
+                  title="Registrar una UPS formato torre u otro equipo en el piso del shaft"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>+ Agregar UPS Torre / Piso</span>
+                </button>
+              </div>
+
+              {adjacentFloorEquipos.length === 0 ? (
+                <div 
+                  onClick={() => handleOpenAddModal({ isNonRackeable: true, tipo: 'ups' })}
+                  className="p-3 bg-slate-900/60 border border-dashed border-slate-700 hover:border-amber-500/60 rounded-lg text-center cursor-pointer transition-all group"
+                >
+                  <div className="flex items-center justify-center gap-2 text-slate-400 group-hover:text-amber-300 text-xs">
+                    <Zap className="w-4 h-4 text-amber-500/70 group-hover:text-amber-400" />
+                    <span>¿Tienes una <strong>UPS Torre</strong> al lado del bastidor en el shaft?</span>
+                    <span className="text-[10px] text-amber-400 underline font-bold ml-1">
+                      Asóciala aquí sin consumir unidades U
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-slate-500 mt-0.5">
+                    Refleja el respaldo eléctrico en el diagrama manteniendo la capacidad 19" ({totalU}U) exacta.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {adjacentFloorEquipos.map(eq => {
+                    const isSelected = selectedEquipo?.id === eq.id;
+                    const capacidadStr = getCapacidadLabel(eq);
+                    return (
+                      <div
+                        key={eq.id}
+                        onClick={() => {
+                          setSelectedEquipo(eq);
+                          setRightPanelTab('detalle');
+                        }}
+                        className={`group relative p-2.5 rounded-lg border transition-all cursor-pointer select-none ${
+                          isSelected
+                            ? 'bg-amber-950/40 border-amber-500 ring-2 ring-amber-400/60 text-white'
+                            : 'bg-slate-900/90 hover:bg-slate-800/90 border-slate-700 text-slate-200'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2.5 overflow-hidden">
+                            {/* Tower chassis badge/icon */}
+                            <div className={`p-2 rounded-md ${isSelected ? 'bg-amber-600 text-white' : 'bg-amber-950/80 text-amber-400 border border-amber-700/60'} shrink-0 shadow-xs`}>
+                              <Zap className="w-4.5 h-4.5" />
+                            </div>
+
+                            {/* Info: Icon, Type, Code, Capacity */}
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-bold text-xs text-white">
+                                  {getTipoEquipoLabel(eq.tipo)} (Torre / Piso Shaft)
+                                </span>
+                                <span className="font-mono font-bold text-xs text-amber-300 bg-amber-950/80 px-1.5 py-0.2 rounded border border-amber-800">
+                                  {eq.codigo}
+                                </span>
+                                {capacidadStr && (
+                                  <span className="text-[11px] font-mono text-blue-300">
+                                    {capacidadStr}
+                                  </span>
+                                )}
+                                {eq.capacidad_va && (
+                                  <span className="text-[11px] font-mono text-amber-400 font-semibold">
+                                    ({eq.capacidad_va} VA)
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Power line indicator to Rack */}
+                              <div className="flex items-center gap-1.5 text-[10px] text-slate-400 mt-0.5">
+                                <span className="text-amber-400 font-mono">⚡ Alimentación AC:</span>
+                                <span className="text-slate-300">Conectada al PDU / Rieles del Bastidor {rack.codigo}</span>
+                                <span className="text-slate-500">•</span>
+                                <span className="text-slate-400">Piso del shaft</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="text-[9px] font-mono font-bold px-2 py-0.5 rounded uppercase tracking-wider bg-slate-800 text-amber-300 border border-slate-600">
+                              NO RACKEABLE · 0U
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -1118,12 +1421,19 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                     </span>
                     <div className="text-lg font-bold font-mono text-slate-900 flex items-center gap-2">
                       <span>{selectedEquipo.codigo}</span>
-                      <span className="text-xs font-mono font-semibold bg-blue-100 text-blue-800 px-2 py-0.5 rounded">
-                        U{String(selectedEquipo.posicion_u_inicio).padStart(2, '0')}
-                        {selectedEquipo.posicion_u_fin && selectedEquipo.posicion_u_fin !== selectedEquipo.posicion_u_inicio && (
-                          ` - U${String(selectedEquipo.posicion_u_fin).padStart(2, '0')}`
-                        )}
-                      </span>
+                      {(!selectedEquipo.posicion_u_inicio || selectedEquipo.posicion_u_inicio === 0 || selectedEquipo.u_range === 'Piso / Shaft') ? (
+                        <span className="text-xs font-mono font-semibold bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 rounded flex items-center gap-1">
+                          <Zap className="w-3 h-3 text-amber-600" />
+                          Piso / Shaft (0U)
+                        </span>
+                      ) : (
+                        <span className="text-xs font-mono font-semibold bg-blue-100 text-blue-800 px-2 py-0.5 rounded">
+                          U{String(selectedEquipo.posicion_u_inicio).padStart(2, '0')}
+                          {selectedEquipo.posicion_u_fin && selectedEquipo.posicion_u_fin !== selectedEquipo.posicion_u_inicio && (
+                            ` - U${String(selectedEquipo.posicion_u_fin).padStart(2, '0')}`
+                          )}
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -1160,9 +1470,11 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                       {selectedEquipo.marca_rel?.nombre || selectedEquipo.marca} {selectedEquipo.modelo_rel?.nombre || selectedEquipo.modelo}
                     </h3>
                     <p className="text-slate-500 text-[11px] mt-0.5">
-                      Categoría: <span className="uppercase font-semibold">{selectedEquipo.tipo}</span> · {
-                        (Math.abs((selectedEquipo.posicion_u_fin || selectedEquipo.posicion_u_inicio || 1) - (selectedEquipo.posicion_u_inicio || 1)) + 1)
-                      }U
+                      Categoría: <span className="uppercase font-semibold">{getTipoEquipoLabel(selectedEquipo.tipo)}</span> · {
+                        (!selectedEquipo.posicion_u_inicio || selectedEquipo.posicion_u_inicio === 0 || selectedEquipo.u_range === 'Piso / Shaft')
+                          ? 'Piso Shaft Adyacente (No Rackeable · 0U)'
+                          : `${(Math.abs((selectedEquipo.posicion_u_fin || selectedEquipo.posicion_u_inicio || 1) - (selectedEquipo.posicion_u_inicio || 1)) + 1)}U`
+                      }
                     </p>
                   </div>
 
@@ -1191,20 +1503,176 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                     </div>
                   </div>
 
-                  {/* Quick drag hint */}
-                  <div className="p-2.5 bg-blue-50/70 border border-blue-200 rounded text-[11px] text-blue-900 flex items-center justify-between">
-                    <span className="flex items-center gap-1.5">
-                      <GripVertical className="w-3.5 h-3.5 text-blue-600" />
-                      <span>Puedes arrastrarlo en el bastidor para reubicarlo.</span>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleDismantleToBodega(selectedEquipo.id)}
-                      className="px-2 py-0.5 bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 rounded text-[10px] font-semibold"
-                    >
-                      A Bodega
-                    </button>
-                  </div>
+                  {/* Quick drag hint / Location info */}
+                  {(!selectedEquipo.posicion_u_inicio || selectedEquipo.posicion_u_inicio === 0 || selectedEquipo.u_range === 'Piso / Shaft') ? (
+                    <div className="p-2.5 bg-amber-50/80 border border-amber-200 rounded text-[11px] text-amber-900 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <Zap className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                        <span>Ubicado sobre el piso del shaft junto al bastidor. No consume ranuras 19".</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleDismantleToBodega(selectedEquipo.id)}
+                        className="px-2 py-0.5 bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 rounded text-[10px] font-semibold shrink-0"
+                      >
+                        A Bodega
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="p-2.5 bg-blue-50/70 border border-blue-200 rounded text-[11px] text-blue-900 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <GripVertical className="w-3.5 h-3.5 text-blue-600" />
+                        <span>Puedes arrastrarlo en el bastidor para reubicarlo.</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleDismantleToBodega(selectedEquipo.id)}
+                        className="px-2 py-0.5 bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 rounded text-[10px] font-semibold"
+                      >
+                        A Bodega
+                      </button>
+                    </div>
+                  )}
+
+                  {/* SECCIÓN ESTÁNDAR DE OCUPACIÓN Y DISPOSITIVOS CONECTADOS (NORMA 75%) */}
+                  {(() => {
+                    const occ = equipmentOccupancyMap[selectedEquipo.id];
+                    if (!occ || occ.totalCapacity <= 0) return null;
+
+                    return (
+                      <div className="space-y-3 pt-1">
+                        {/* SECCIÓN ESTÁNDAR DE OCUPACIÓN */}
+                        <div className={`p-3 rounded-lg border text-xs ${
+                          occ.status === 'critico'
+                            ? 'bg-rose-50/80 border-rose-300 text-rose-950'
+                            : occ.status === 'alerta'
+                            ? 'bg-amber-50/80 border-amber-300 text-amber-950'
+                            : 'bg-emerald-50/80 border-emerald-300 text-emerald-950'
+                        }`}>
+                          <div className="flex items-center justify-between gap-2 mb-1.5">
+                            <div className="flex items-center gap-1.5 font-bold">
+                              {occ.status === 'critico' ? (
+                                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                              ) : occ.status === 'alerta' ? (
+                                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                              ) : (
+                                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                              )}
+                              <span className="text-[11px] uppercase tracking-wide">
+                                Estándar de Ocupación ({occ.percentage}%)
+                              </span>
+                            </div>
+
+                            <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${
+                              occ.status === 'critico'
+                                ? 'bg-rose-100 text-rose-800 border-rose-300'
+                                : occ.status === 'alerta'
+                                ? 'bg-amber-100 text-amber-900 border-amber-300'
+                                : 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                            }`}>
+                              {occ.status === 'critico' ? '>=78% SATURADO' : occ.status === 'alerta' ? '74-77% UMBRAL 75%' : '<73% DISPONIBLE'}
+                            </span>
+                          </div>
+
+                          {/* Progress Bar con meta del 75% marcada */}
+                          <div className="space-y-1 my-2">
+                            <div className="relative w-full h-3 bg-slate-200 rounded-full overflow-hidden">
+                              <div 
+                                className={`h-full transition-all duration-300 ${
+                                  occ.status === 'critico' ? 'bg-rose-600' : occ.status === 'alerta' ? 'bg-amber-500' : 'bg-emerald-500'
+                                }`}
+                                style={{ width: `${Math.min(100, occ.percentage)}%` }}
+                              />
+                              {/* 75% reference line */}
+                              <div 
+                                className="absolute top-0 bottom-0 w-0.5 bg-slate-800/70 z-10" 
+                                style={{ left: '75%' }} 
+                                title="Estándar Objetivo: 75% de Ocupación"
+                              />
+                            </div>
+                            <div className="flex justify-between items-center text-[10px] text-slate-500 font-mono">
+                              <span>{occ.occupiedCount} ocupados ({occ.availableCount} libres)</span>
+                              <span className="font-semibold text-slate-700">Meta: 75% | Capacidad: {occ.totalCapacity}</span>
+                            </div>
+                          </div>
+
+                          {/* Directriz de inventario */}
+                          <div className="mt-2 pt-2 border-t border-slate-200/80 text-[11px] leading-relaxed">
+                            <p className="font-semibold">
+                              {occ.status === 'critico' ? (
+                                <span className="text-rose-700">🚨 Directriz de Ampliación de Inventario:</span>
+                              ) : occ.status === 'alerta' ? (
+                                <span className="text-amber-800">⚠️ Directriz de Inventario:</span>
+                              ) : (
+                                <span className="text-emerald-800">✅ Directriz de Inventario:</span>
+                              )}
+                            </p>
+                            <p className="mt-0.5 text-slate-700">
+                              {occ.recommendation}
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* SECCIÓN DISPOSITIVOS CONECTADOS */}
+                        <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-[11px] font-mono font-bold text-slate-800 uppercase flex items-center gap-1.5">
+                              <Network className="w-3.5 h-3.5 text-blue-600" />
+                              Dispositivos Conectados ({occ.connectedCameras.length + occ.connectedUplinks.length})
+                            </span>
+                            {(selectedEquipo.tipo === 'switch' || selectedEquipo.tipo === 'patch_panel') && (
+                              <button
+                                type="button"
+                                onClick={() => onNavigateToPorts(selectedEquipo.id)}
+                                className="text-[10px] text-blue-600 hover:text-blue-800 font-semibold flex items-center gap-0.5"
+                              >
+                                <span>Matriz</span>
+                                <ArrowRight className="w-3 h-3" />
+                              </button>
+                            )}
+                          </div>
+
+                          {occ.connectedCameras.length === 0 && occ.connectedUplinks.length === 0 ? (
+                            <div className="text-center py-3 text-slate-400 text-[11px]">
+                              <span>No hay cámaras ni enlaces conectados a este equipo.</span>
+                            </div>
+                          ) : (
+                            <div className="max-h-52 overflow-y-auto divide-y divide-slate-200 space-y-1 pr-1 scrollbar-thin">
+                              {occ.connectedUplinks.map((up: any, idx: number) => (
+                                <div key={`uplink-${idx}`} className="pt-1 pb-1 flex items-center justify-between text-[11px]">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-mono font-bold text-amber-800 bg-amber-100 px-1.5 py-0.2 rounded text-[10px] border border-amber-300">
+                                      Puerto {up.portNum}
+                                    </span>
+                                    <span className="font-semibold text-slate-800">Uplink NVR Troncal</span>
+                                  </div>
+                                  <span className="text-[10px] text-amber-700 font-mono">1 Gbps</span>
+                                </div>
+                              ))}
+                              {occ.connectedCameras.map((conn: any, idx: number) => (
+                                <div key={`cam-${conn.camera.id}-${idx}`} className="pt-1.5 pb-1 flex items-center justify-between text-[11px]">
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <span className="font-mono font-bold text-blue-800 bg-blue-100 px-1.5 py-0.2 rounded text-[10px] border border-blue-200 shrink-0">
+                                      {conn.portOrChannel}
+                                    </span>
+                                    <div className="min-w-0">
+                                      <span className="font-bold text-slate-900 block truncate">
+                                        {conn.camera.codigo}
+                                      </span>
+                                      <span className="text-[10px] text-slate-500 block truncate">
+                                        {conn.camera.modelo || conn.camera.tipo_dispositivo || 'Cámara'} {conn.camera.direccion_ip ? `· IP ${conn.camera.direccion_ip}` : ''}
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <Camera className="w-3.5 h-3.5 text-blue-500 shrink-0 ml-2" />
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Actions */}
                   <div className="pt-2 flex flex-col gap-2">
@@ -1268,7 +1736,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={handleOpenAddModal}
+                    onClick={() => handleOpenAddModal()}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-semibold shadow-xs transition-colors"
                   >
                     <Plus className="w-3.5 h-3.5" />
@@ -1398,143 +1866,212 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                 </div>
               </div>
 
-              {/* SECCIÓN INTELIGENTE DE DISPOSICIÓN U */}
+              {/* SECCIÓN INTELIGENTE DE DISPOSICIÓN & UBICACIÓN FÍSICA */}
               <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg space-y-3">
                 <div className="flex items-center justify-between">
                   <label className="text-[11px] text-slate-800 font-bold flex items-center gap-1.5">
                     <Server className="w-3.5 h-3.5 text-blue-600" />
-                    <span>Disposición en el Bastidor</span>
+                    <span>Disposición & Ubicación Física</span>
                   </label>
+                  {formData.es_rackeable !== false && (
+                    <button
+                      type="button"
+                      onClick={() => setModoAvanzadoU(!modoAvanzadoU)}
+                      className="text-[10px] text-blue-600 hover:underline font-mono"
+                    >
+                      {modoAvanzadoU ? '← Modo inteligente (U Superior + Altura)' : 'Ajuste manual Inicio/Fin'}
+                    </button>
+                  )}
+                </div>
+
+                {/* Selector de Modalidad: Montado en Bastidor vs Piso del Shaft (No Rackeable) */}
+                <div className="grid grid-cols-2 gap-2 text-xs">
                   <button
                     type="button"
-                    onClick={() => setModoAvanzadoU(!modoAvanzadoU)}
-                    className="text-[10px] text-blue-600 hover:underline font-mono"
+                    onClick={() => {
+                      setFormData(prev => ({
+                        ...prev,
+                        es_rackeable: true,
+                        posicion_u_inicio: prev.posicion_u_inicio && prev.posicion_u_inicio > 0 ? prev.posicion_u_inicio : 1,
+                        posicion_u_fin: prev.posicion_u_fin && prev.posicion_u_fin > 0 ? prev.posicion_u_fin : 1
+                      }));
+                    }}
+                    className={`p-2.5 rounded-lg border text-left flex flex-col gap-1 transition-all ${
+                      formData.es_rackeable !== false
+                        ? 'bg-blue-50/90 border-blue-500 ring-1 ring-blue-500 text-blue-950 font-semibold'
+                        : 'bg-white border-slate-200 hover:bg-slate-100 text-slate-700'
+                    }`}
                   >
-                    {modoAvanzadoU ? '← Modo inteligente (U Superior + Altura)' : 'Ajuste manual Inicio/Fin'}
+                    <div className="flex items-center gap-1.5">
+                      <Server className="w-3.5 h-3.5 text-blue-600" />
+                      <span className="font-bold">Montado en Bastidor</span>
+                    </div>
+                    <span className="text-[10px] text-slate-500 font-normal">
+                      Estándar 19", ocupa unidades U (1U - {totalU}U)
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFormData(prev => ({
+                        ...prev,
+                        es_rackeable: false,
+                        posicion_u_inicio: 0,
+                        posicion_u_fin: 0
+                      }));
+                    }}
+                    className={`p-2.5 rounded-lg border text-left flex flex-col gap-1 transition-all ${
+                      formData.es_rackeable === false
+                        ? 'bg-amber-50/90 border-amber-500 ring-1 ring-amber-500 text-amber-950 font-semibold'
+                        : 'bg-white border-slate-200 hover:bg-slate-100 text-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Zap className="w-3.5 h-3.5 text-amber-600" />
+                      <span className="font-bold">Piso / Shaft (No Rackeable)</span>
+                    </div>
+                    <span className="text-[10px] text-slate-500 font-normal">
+                      Junto al rack, ej: UPS Torre o pedestal (0U)
+                    </span>
                   </button>
                 </div>
 
-                {!modoAvanzadoU ? (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {/* Selector de Altura (U) */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-[11px] text-slate-700 font-semibold">
-                          Altura (Unidades U) *
-                        </label>
-                        <span className="text-[10px] text-slate-500 font-sans">
-                          Sugerida por modelo/tipo
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        {[1, 2, 3, 4].map(u => (
-                          <button
-                            key={u}
-                            type="button"
-                            onClick={() => {
-                              const uSup = Number(formData.posicion_u_fin || totalU);
-                              const uInf = calculateUInferior(uSup, u);
-                              setFormAlturaU(u);
-                              setFormData(prev => ({
-                                ...prev,
-                                posicion_u_inicio: uInf,
-                                posicion_u_fin: uSup
-                              }));
-                            }}
-                            className={`flex-1 py-1 text-xs font-bold rounded border transition-colors ${
-                              formAlturaU === u
-                                ? 'bg-blue-600 text-white border-blue-600'
-                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
-                            }`}
-                          >
-                            {u}U
-                          </button>
-                        ))}
-                        <input
-                          type="number"
-                          min="1"
-                          max="12"
-                          value={formAlturaU}
-                          onChange={(e) => {
-                            const u = Math.max(1, parseInt(e.target.value) || 1);
-                            const uSup = Number(formData.posicion_u_fin || totalU);
-                            const uInf = calculateUInferior(uSup, u);
-                            setFormAlturaU(u);
-                            setFormData(prev => ({
-                              ...prev,
-                              posicion_u_inicio: uInf,
-                              posicion_u_fin: uSup
-                            }));
-                          }}
-                          className="w-12 px-1.5 py-1 text-xs border border-slate-300 rounded text-center font-bold bg-white"
-                          title="Altura manual en U"
-                        />
-                      </div>
+                {formData.es_rackeable === false ? (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-md text-amber-900 text-[11px] space-y-1">
+                    <div className="font-bold flex items-center gap-1.5 text-amber-800">
+                      <Zap className="w-4 h-4 text-amber-600 shrink-0" />
+                      <span>Equipo Adyacente en Piso del Shaft (No consume unidades U)</span>
                     </div>
-
-                    {/* Selector de U Superior */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-[11px] text-slate-700 font-semibold">
-                          U Superior (Tope en bastidor) *
-                        </label>
-                        <span className="text-[10px] text-slate-500">1 a {totalU}</span>
-                      </div>
-                      <input
-                        type="number"
-                        min="1"
-                        max={totalU}
-                        required
-                        value={formData.posicion_u_fin || totalU}
-                        onChange={(e) => {
-                          const uSup = parseInt(e.target.value) || 1;
-                          const uInf = calculateUInferior(uSup, formAlturaU);
-                          setFormData(prev => ({
-                            ...prev,
-                            posicion_u_fin: uSup,
-                            posicion_u_inicio: uInf
-                          }));
-                        }}
-                        className="w-full px-3 py-1.5 border border-slate-300 rounded font-mono font-bold text-blue-700 text-xs focus:ring-1 focus:ring-blue-600 bg-white"
-                      />
-                    </div>
+                    <p className="text-[10px] text-amber-800/90 leading-relaxed font-sans">
+                      Ideal para UPS en formato torre o equipos de suelo que comparten el shaft de corrientes débiles y alimentan eléctricamente el rack, pero no disponen de orejas ni rieles 19". Se reflejará claramente al lado de la elevación frontal del bastidor.
+                    </p>
                   </div>
                 ) : (
-                  /* Modo tradicional Inicio/Fin */
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-[11px] text-slate-700 font-semibold mb-1">Posición U Inicio (Base)</label>
-                      <input
-                        type="number"
-                        min="1"
-                        max={totalU}
-                        value={formData.posicion_u_inicio}
-                        onChange={(e) => {
-                          const uInf = parseInt(e.target.value) || 1;
-                          const uSup = Math.max(uInf, formData.posicion_u_fin);
-                          setFormData(prev => ({ ...prev, posicion_u_inicio: uInf, posicion_u_fin: uSup }));
-                          setFormAlturaU(uSup - uInf + 1);
-                        }}
-                        className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs font-mono bg-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] text-slate-700 font-semibold mb-1">Posición U Fin (Tope)</label>
-                      <input
-                        type="number"
-                        min="1"
-                        max={totalU}
-                        value={formData.posicion_u_fin}
-                        onChange={(e) => {
-                          const uSup = parseInt(e.target.value) || 1;
-                          const uInf = Math.min(uSup, formData.posicion_u_inicio);
-                          setFormData(prev => ({ ...prev, posicion_u_fin: uSup, posicion_u_inicio: uInf }));
-                          setFormAlturaU(uSup - uInf + 1);
-                        }}
-                        className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs font-mono bg-white"
-                      />
-                    </div>
-                  </div>
+                  <>
+                    {!modoAvanzadoU ? (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        {/* Selector de Altura (U) */}
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-[11px] text-slate-700 font-semibold">
+                              Altura (Unidades U) *
+                            </label>
+                            <span className="text-[10px] text-slate-500 font-sans">
+                              Sugerida por modelo/tipo
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            {[1, 2, 3, 4].map(u => (
+                              <button
+                                key={u}
+                                type="button"
+                                onClick={() => {
+                                  const uSup = Number(formData.posicion_u_fin || totalU);
+                                  const uInf = calculateUInferior(uSup, u);
+                                  setFormAlturaU(u);
+                                  setFormData(prev => ({
+                                    ...prev,
+                                    posicion_u_inicio: uInf,
+                                    posicion_u_fin: uSup
+                                  }));
+                                }}
+                                className={`flex-1 py-1 text-xs font-bold rounded border transition-colors ${
+                                  formAlturaU === u
+                                    ? 'bg-blue-600 text-white border-blue-600'
+                                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                                }`}
+                              >
+                                {u}U
+                              </button>
+                            ))}
+                            <input
+                              type="number"
+                              min="1"
+                              max="12"
+                              value={formAlturaU}
+                              onChange={(e) => {
+                                const u = Math.max(1, parseInt(e.target.value) || 1);
+                                const uSup = Number(formData.posicion_u_fin || totalU);
+                                const uInf = calculateUInferior(uSup, u);
+                                setFormAlturaU(u);
+                                setFormData(prev => ({
+                                  ...prev,
+                                  posicion_u_inicio: uInf,
+                                  posicion_u_fin: uSup
+                                }));
+                              }}
+                              className="w-12 px-1.5 py-1 text-xs border border-slate-300 rounded text-center font-bold bg-white"
+                              title="Altura manual en U"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Selector de U Superior */}
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-[11px] text-slate-700 font-semibold">
+                              U Superior (Tope en bastidor) *
+                            </label>
+                            <span className="text-[10px] text-slate-500">1 a {totalU}</span>
+                          </div>
+                          <input
+                            type="number"
+                            min="1"
+                            max={totalU}
+                            required
+                            value={formData.posicion_u_fin || totalU}
+                            onChange={(e) => {
+                              const uSup = parseInt(e.target.value) || 1;
+                              const uInf = calculateUInferior(uSup, formAlturaU);
+                              setFormData(prev => ({
+                                ...prev,
+                                posicion_u_fin: uSup,
+                                posicion_u_inicio: uInf
+                              }));
+                            }}
+                            className="w-full px-3 py-1.5 border border-slate-300 rounded font-mono font-bold text-blue-700 text-xs focus:ring-1 focus:ring-blue-600 bg-white"
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      /* Modo tradicional Inicio/Fin */
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[11px] text-slate-700 font-semibold mb-1">Posición U Inicio (Base)</label>
+                          <input
+                            type="number"
+                            min="1"
+                            max={totalU}
+                            value={formData.posicion_u_inicio}
+                            onChange={(e) => {
+                              const uInf = parseInt(e.target.value) || 1;
+                              const uSup = Math.max(uInf, formData.posicion_u_fin);
+                              setFormData(prev => ({ ...prev, posicion_u_inicio: uInf, posicion_u_fin: uSup }));
+                              setFormAlturaU(uSup - uInf + 1);
+                            }}
+                            className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs font-mono bg-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-700 font-semibold mb-1">Posición U Fin (Tope)</label>
+                          <input
+                            type="number"
+                            min="1"
+                            max={totalU}
+                            value={formData.posicion_u_fin}
+                            onChange={(e) => {
+                              const uSup = parseInt(e.target.value) || 1;
+                              const uInf = Math.min(uSup, formData.posicion_u_inicio);
+                              setFormData(prev => ({ ...prev, posicion_u_fin: uSup, posicion_u_inicio: uInf }));
+                              setFormAlturaU(uSup - uInf + 1);
+                            }}
+                            className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs font-mono bg-white"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
 
                 {/* Feedback en vivo de validación */}
