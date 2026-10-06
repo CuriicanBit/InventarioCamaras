@@ -25,10 +25,12 @@ import {
   Wifi,
   Laptop,
   Plus,
-  Tag
+  Tag,
+  Briefcase,
+  GraduationCap
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Rack, Equipo, Camara, Piso, Edificio, PuntoRed, PuertoSwitchOcupacion } from '../types/database';
+import { Rack, Equipo, Camara, Piso, Edificio, PuntoRed, PuertoSwitchOcupacion, Vlan } from '../types/database';
 import { getOccupancyStatus } from '../utils/occupancyAlerts';
 
 interface PatchPanelPortMapProps {
@@ -151,6 +153,7 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
   const [camaras, setCamaras] = useState<Camara[]>([]);
   const [puntosRed, setPuntosRed] = useState<PuntoRed[]>([]);
   const [switchPortsOccupation, setSwitchPortsOccupation] = useState<PuertoSwitchOcupacion[]>([]);
+  const [vlansList, setVlansList] = useState<Vlan[]>([]);
   const [, setPisosMap] = useState<Record<string, Piso>>({});
   const [, setEdificiosMap] = useState<Record<string, Edificio>>({});
 
@@ -188,6 +191,7 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
   const [selectedNvrId, setSelectedNvrId] = useState<string | null>(null);
   const [hoveredPort, setHoveredPort] = useState<{ equipoId: string; portNum: number } | null>(null);
   const [searchFilter, setSearchFilter] = useState('');
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [, setSavingAction] = useState(false);
 
@@ -296,19 +300,22 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
         { data: puntosData },
         { data: pisosData },
         { data: edificiosData },
-        { data: histData }
+        { data: histData },
+        { data: vlansData }
       ] = await Promise.all([
         supabase.from('equipos').select('*, marca_rel:marcas(*), modelo_rel:modelos(*)').eq('rack_id', currentRack.id),
         supabase.from('camaras').select('*, marca_rel:marcas(*), modelo_rel:modelos(*)').eq('rack_id', currentRack.id),
-        supabase.from('puntos_red').select('*'),
+        supabase.from('puntos_red').select('*, marca_rel:marcas(*), modelo_rel:modelos(*)'),
         supabase.from('pisos').select('*'),
         supabase.from('edificios').select('*'),
-        supabase.from('historial_mantenimiento').select('*').eq('entidad_tipo', 'equipo').order('created_at', { ascending: false }).limit(20)
+        supabase.from('historial_mantenimiento').select('*').eq('entidad_tipo', 'equipo').order('created_at', { ascending: false }).limit(20),
+        supabase.from('vlans').select('*').order('numero')
       ]);
 
       const loadedEquipos = eqData || [];
       setEquipos(loadedEquipos);
       setCamaras(camData || []);
+      setVlansList(vlansData || []);
 
       const swIds = loadedEquipos.filter(e => e.tipo === 'switch').map(s => s.id);
       const ppIds = loadedEquipos.filter(e => e.tipo === 'patch_panel').map(p => p.id);
@@ -392,11 +399,17 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
       });
   }, [equipos]);
 
-  // Max ports found across all equipment in this rack (e.g. 24 or 48)
+  // Max ports found across all equipment in this rack (excluding SFP ports on switches)
   const maxPortsInRack = useMemo(() => {
     if (rackBayEquipos.length === 0) return 24;
-    return Math.max(...rackBayEquipos.map(e => e.puertos_totales || 24), 24);
-  }, [rackBayEquipos]);
+    return Math.max(...rackBayEquipos.map(e => {
+      if (e.tipo === 'switch') {
+        const rj45s = switchPortsOccupation.filter(sp => sp.switch_id === e.id && sp.tipo_puerto !== 'sfp');
+        return rj45s.length > 0 ? rj45s.length : (e.puertos_totales || 24);
+      }
+      return e.puertos_totales || 24;
+    }), 24);
+  }, [rackBayEquipos, switchPortsOccupation]);
 
   // NVRs in the rack
   const rackNvrs = useMemo(() => {
@@ -405,7 +418,7 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
       .sort((a, b) => (b.posicion_u_inicio ?? 0) - (a.posicion_u_inicio ?? 0));
   }, [equipos]);
 
-  // Switch port VLAN lookup map
+  // Switch port VLAN lookup map (synced with vlans table)
   const switchPortVlanMap = useMemo(() => {
     const map: Record<string, {
       vlan_numero: number | null;
@@ -417,40 +430,44 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
     }> = {};
 
     switchPortsOccupation.forEach(sp => {
+      const vlanObj = vlansList.find(v => v.id === (sp as any).vlan_id || v.numero === (sp.vlan_numero ?? sp.vlan));
       const key = makePortKey(sp.switch_id, sp.numero_puerto);
       map[key] = {
-        vlan_numero: sp.vlan_numero,
-        vlan_nombre: sp.vlan_nombre,
-        vlan_color: sp.vlan_color,
-        uso: sp.uso,
+        vlan_numero: sp.vlan_numero ?? vlanObj?.numero ?? null,
+        vlan_nombre: sp.vlan_nombre ?? vlanObj?.nombre ?? null,
+        vlan_color: vlanObj?.color || sp.vlan_color || null,
+        uso: sp.uso || vlanObj?.descripcion || null,
         puerto_switch_id: sp.puerto_switch_id,
         tipo_puerto: sp.tipo_puerto,
       };
     });
 
     return map;
-  }, [switchPortsOccupation]);
+  }, [switchPortsOccupation, vlansList]);
 
-  // Distinct active VLANs in this rack for the legend
+  // Distinct active VLANs in this rack for the legend & filter strip (excluding SFP trunk ports)
   const activeRackVlans = useMemo(() => {
     const seen = new Map<number, { numero: number; nombre: string | null; color: string | null; count: number }>();
     switchPortsOccupation.forEach(sp => {
-      if (sp.vlan_numero) {
-        const existing = seen.get(sp.vlan_numero);
+      if (sp.tipo_puerto === 'sfp') return; // Exclude SFP trunk ports
+      const vNum = sp.vlan_numero ?? sp.vlan;
+      if (vNum) {
+        const vlanObj = vlansList.find(v => v.id === (sp as any).vlan_id || v.numero === vNum);
+        const existing = seen.get(vNum);
         if (existing) {
           existing.count += 1;
         } else {
-          seen.set(sp.vlan_numero, {
-            numero: sp.vlan_numero,
-            nombre: sp.vlan_nombre,
-            color: sp.vlan_color || '#3b82f6',
+          seen.set(vNum, {
+            numero: vNum,
+            nombre: sp.vlan_nombre ?? vlanObj?.nombre ?? null,
+            color: vlanObj?.color || sp.vlan_color || '#3b82f6',
             count: 1
           });
         }
       }
     });
     return Array.from(seen.values()).sort((a, b) => a.numero - b.numero);
-  }, [switchPortsOccupation]);
+  }, [switchPortsOccupation, vlansList]);
 
   // Cross-connect connections calculation (for both CCTV Cameras and Network Points)
   const { connections, patchPortToEntity, switchPortToEntity } = useMemo(() => {
@@ -797,6 +814,23 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
       ? (conn ? switchPortVlanMap[makePortKey(conn.switchId, conn.switchPortNum)] : null)
       : switchPortVlanMap[key];
 
+    const effectiveVlanInfo = vlanInfo || (
+      entity?.punto?.puerto_switch_id 
+        ? switchPortVlanMap[makePortKey(
+            switchPortsOccupation.find(s => s.puerto_switch_id === entity.punto?.puerto_switch_id)?.switch_id || '',
+            switchPortsOccupation.find(s => s.puerto_switch_id === entity.punto?.puerto_switch_id)?.numero_puerto || 0
+          )]
+        : entity?.camara?.switch_id
+        ? switchPortVlanMap[makePortKey(
+            entity.camara.switch_id,
+            parseSwitchPortNumber(entity.camara.puerto_switch) || 0
+          )]
+        : null
+    );
+
+    const targetCamera = entity?.camara || conn?.camera || null;
+    const targetPunto = entity?.punto || conn?.puntoRed || null;
+
     if (selectedPort?.equipoId === equipo.id && selectedPort?.portNum === portNum) {
       setSelectedPort(null);
     } else {
@@ -804,13 +838,13 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
         equipoId: equipo.id,
         portNum,
         tipo: isPatch ? 'patch_panel' : 'switch',
-        camara: entity?.camara || null,
-        puntoRed: entity?.punto || null,
-        vlan: vlanInfo?.vlan_numero ? {
-          numero: vlanInfo.vlan_numero,
-          nombre: vlanInfo.vlan_nombre,
-          color: vlanInfo.vlan_color,
-          uso: vlanInfo.uso
+        camara: targetCamera,
+        puntoRed: targetPunto,
+        vlan: effectiveVlanInfo?.vlan_numero ? {
+          numero: effectiveVlanInfo.vlan_numero,
+          nombre: effectiveVlanInfo.vlan_nombre,
+          color: effectiveVlanInfo.vlan_color,
+          uso: effectiveVlanInfo.uso
         } : null,
         counterpart,
         isNvrUplink: Boolean(nvrUplink),
@@ -1355,7 +1389,7 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
             puerto_switch_id: null
           })
           .eq('id', ptoId)
-          .select('*')
+          .select('*, marca_rel:marcas(*), modelo_rel:modelos(*)')
           .single();
 
         if (error) throw error;
@@ -1453,17 +1487,27 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
     document.body.removeChild(link);
   };
 
-  // Filtered cameras for search
-  const filteredCameras = useMemo(() => {
-    if (!searchFilter.trim()) return [];
+  // Filtered cameras and puntos_red for search
+  const searchResults = useMemo(() => {
+    if (!searchFilter.trim()) return { cameras: [], puntos: [], totalCount: 0 };
     const query = searchFilter.toLowerCase().trim();
-    return camaras.filter(c => 
+
+    const cameras = camaras.filter(c => 
       c.codigo.toLowerCase().includes(query) ||
       (c.direccion_ip && c.direccion_ip.toLowerCase().includes(query)) ||
       (c.direccion_mac && c.direccion_mac.toLowerCase().includes(query)) ||
       (c.ubicacion_especifica && c.ubicacion_especifica.toLowerCase().includes(query))
     );
-  }, [camaras, searchFilter]);
+
+    const puntos = puntosRed.filter(p =>
+      p.codigo.toLowerCase().includes(query) ||
+      (p.ubicacion_especifica && p.ubicacion_especifica.toLowerCase().includes(query)) ||
+      (p.direccion_ip && p.direccion_ip.toLowerCase().includes(query)) ||
+      (p.direccion_mac && p.direccion_mac.toLowerCase().includes(query))
+    );
+
+    return { cameras, puntos, totalCount: cameras.length + puntos.length };
+  }, [camaras, puntosRed, searchFilter]);
 
   // Overall statistics for the rack
   const totalSwitchCount = rackBayEquipos.filter(e => e.tipo === 'switch').length;
@@ -1559,21 +1603,156 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
     );
   }
 
-  // Render a single port button with explicit high z-index and graphical VLAN indicators
+  // Render a single port button with explicit high z-index, VLAN coloring, and occupant icons
   const renderPortButton = (eq: Equipo, pNum: number) => {
     const isSwitch = eq.tipo === 'switch';
+
+    // No mostrar los puertos SFP en esta pantalla (son para enlaces troncales)
+    if (isSwitch) {
+      const isSfpPort = switchPortsOccupation.some(
+        sp => sp.switch_id === eq.id && sp.numero_puerto === pNum && sp.tipo_puerto === 'sfp'
+      );
+      if (isSfpPort) return null;
+    }
+
     const key = makePortKey(eq.id, pNum);
     const entity = isSwitch ? switchPortToEntity[key] : patchPortToEntity[key];
     const conn = findConnectionForPort(eq.id, pNum);
     const nvrUplink = findNvrForPort(eq.id, pNum);
 
-    // VLAN resolution
-    const swVlan = isSwitch 
+    // Determinar si está ocupado
+    const isOccupied = Boolean(
+      entity || 
+      conn || 
+      nvrUplink || 
+      (isSwitch && switchPortsOccupation.some(sp => sp.switch_id === eq.id && sp.numero_puerto === pNum && (sp.ocupado_por_codigo || (sp.uso && sp.uso !== 'Libre'))))
+    );
+
+    // Resolución de VLAN asignada (desde la tabla vlans, vía vlan_id en puertos_switch)
+    let swVlan = isSwitch 
       ? switchPortVlanMap[key] 
       : (conn ? switchPortVlanMap[makePortKey(conn.switchId, conn.switchPortNum)] : null);
 
+    if (!swVlan && !isSwitch) {
+      if (entity?.punto?.puerto_switch_id) {
+        const sp = switchPortsOccupation.find(s => s.puerto_switch_id === entity.punto?.puerto_switch_id);
+        if (sp) swVlan = switchPortVlanMap[makePortKey(sp.switch_id, sp.numero_puerto)];
+      } else if (entity?.camara?.switch_id) {
+        const swNum = parseSwitchPortNumber(entity.camara.puerto_switch);
+        if (swNum) swVlan = switchPortVlanMap[makePortKey(entity.camara.switch_id, swNum)];
+      }
+    }
+
+    const hasVlan = Boolean(swVlan?.vlan_numero);
+    const hasVlanColor = Boolean(swVlan?.vlan_color);
+    const isColoredByVlan = isOccupied && hasVlan && hasVlanColor;
+
+    // Determinar qué tipo de ocupante tiene (cámara, datos funcionario, datos alumno, wifi ap, nvr)
+    let occupantType: 'camara' | 'datos_funcionario' | 'datos_alumno' | 'wifi_ap' | 'nvr' | null = null;
+    let occupantLabel = 'Libre';
+
+    if (nvrUplink) {
+      occupantType = 'nvr';
+      occupantLabel = 'Uplink NVR';
+    } else if (entity?.tipo === 'camara' || conn?.tipo === 'camara' || entity?.camara || conn?.camera) {
+      occupantType = 'camara';
+      occupantLabel = 'Cámara CCTV';
+    } else if (entity?.punto || conn?.puntoRed) {
+      const pto = entity?.punto || conn?.puntoRed;
+      if (pto?.tipo_punto === 'datos_funcionario') {
+        occupantType = 'datos_funcionario';
+        occupantLabel = 'Datos Funcionario';
+      } else if (pto?.tipo_punto === 'datos_alumno') {
+        occupantType = 'datos_alumno';
+        occupantLabel = 'Datos Alumno';
+      } else if (pto?.tipo_punto === 'wifi_ap') {
+        occupantType = 'wifi_ap';
+        occupantLabel = 'AP WiFi';
+      } else {
+        occupantType = 'datos_funcionario';
+        occupantLabel = 'Punto de Red';
+      }
+    } else if (isSwitch) {
+      const sp = switchPortsOccupation.find(s => s.switch_id === eq.id && s.numero_puerto === pNum);
+      if (sp?.ocupado_por_tipo === 'camara' || sp?.uso === 'CCTV') {
+        occupantType = 'camara';
+        occupantLabel = 'Cámara CCTV';
+      } else if (sp?.uso === 'WiFi AP') {
+        occupantType = 'wifi_ap';
+        occupantLabel = 'AP WiFi';
+      } else if (sp?.uso === 'Datos Alumno') {
+        occupantType = 'datos_alumno';
+        occupantLabel = 'Datos Alumno';
+      } else if (sp?.ocupado_por_tipo === 'punto_red' || sp?.uso === 'Datos Funcionario') {
+        occupantType = 'datos_funcionario';
+        occupantLabel = 'Datos Funcionario';
+      }
+    }
+
+    // Requisito: Un puerto sin VLAN asignada o sin nada conectado se muestra en gris, sin ícono.
+    let occupantIcon: React.ReactNode = null;
+    if (isColoredByVlan) {
+      if (occupantType === 'camara') {
+        occupantIcon = <Camera className="w-3.5 h-3.5 shrink-0" style={{ color: swVlan?.vlan_color || '#38bdf8' }} />;
+      } else if (occupantType === 'datos_funcionario') {
+        occupantIcon = <Briefcase className="w-3.5 h-3.5 shrink-0" style={{ color: swVlan?.vlan_color || '#60a5fa' }} />;
+      } else if (occupantType === 'datos_alumno') {
+        occupantIcon = <GraduationCap className="w-3.5 h-3.5 shrink-0" style={{ color: swVlan?.vlan_color || '#34d399' }} />;
+      } else if (occupantType === 'wifi_ap') {
+        occupantIcon = <Wifi className="w-3.5 h-3.5 shrink-0" style={{ color: swVlan?.vlan_color || '#818cf8' }} />;
+      } else if (occupantType === 'nvr') {
+        occupantIcon = <HardDrive className="w-3.5 h-3.5 text-amber-300 shrink-0" />;
+      }
+    } else {
+      // Sin icono si no tiene VLAN o si no está ocupado
+      occupantIcon = null;
+    }
+
+    // Código visible del dispositivo
+    let displayCode = '';
+    if (nvrUplink) {
+      displayCode = 'NVR-UP';
+    } else if (entity?.codigo) {
+      displayCode = entity.codigo.length > 7 ? entity.codigo.replace('CAM-ENG-P2-', 'C-') : entity.codigo;
+    } else if (conn?.codigo) {
+      displayCode = conn.codigo.length > 7 ? conn.codigo.replace('CAM-ENG-P2-', 'C-') : conn.codigo;
+    } else if (isSwitch) {
+      const sp = switchPortsOccupation.find(s => s.switch_id === eq.id && s.numero_puerto === pNum);
+      if (sp?.ocupado_por_codigo) displayCode = sp.ocupado_por_codigo;
+    }
+
     const matchesVlanFilter = selectedVlanFilter !== null && swVlan?.vlan_numero === selectedVlanFilter;
     const isVlanDimmed = selectedVlanFilter !== null && swVlan?.vlan_numero !== selectedVlanFilter;
+
+    // Búsqueda en tiempo real
+    const isSearchActive = searchFilter.trim().length > 0;
+    const q = searchFilter.toLowerCase().trim();
+    const matchesSearch = isSearchActive && Boolean(
+      (entity?.camara && (
+        entity.camara.codigo.toLowerCase().includes(q) ||
+        entity.camara.direccion_ip?.toLowerCase().includes(q) ||
+        entity.camara.direccion_mac?.toLowerCase().includes(q) ||
+        entity.camara.ubicacion_especifica?.toLowerCase().includes(q)
+      )) ||
+      (entity?.punto && (
+        entity.punto.codigo.toLowerCase().includes(q) ||
+        entity.punto.ubicacion_especifica?.toLowerCase().includes(q) ||
+        entity.punto.direccion_ip?.toLowerCase().includes(q) ||
+        entity.punto.direccion_mac?.toLowerCase().includes(q)
+      )) ||
+      (conn?.camera && (
+        conn.camera.codigo.toLowerCase().includes(q) ||
+        conn.camera.direccion_ip?.toLowerCase().includes(q) ||
+        conn.camera.direccion_mac?.toLowerCase().includes(q) ||
+        conn.camera.ubicacion_especifica?.toLowerCase().includes(q)
+      )) ||
+      (conn?.puntoRed && (
+        conn.puntoRed.codigo.toLowerCase().includes(q) ||
+        conn.puntoRed.ubicacion_especifica?.toLowerCase().includes(q) ||
+        conn.puntoRed.direccion_ip?.toLowerCase().includes(q) ||
+        conn.puntoRed.direccion_mac?.toLowerCase().includes(q)
+      ))
+    );
 
     const isSelected = selectedPort?.equipoId === eq.id && selectedPort?.portNum === pNum;
     const isHovered = hoveredPort?.equipoId === eq.id && hoveredPort?.portNum === pNum;
@@ -1583,14 +1762,29 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
     const isClickSource = clickConnectSource?.equipoId === eq.id && clickConnectSource?.portNum === pNum;
 
     const hasActive = activeConnection !== null || selectedPort !== null;
-    const isDimmed = (hasActive && !isSelected && !isHovered && !isConnHighlighted && !isDropTarget && !isClickSource) || isVlanDimmed;
+    const isDimmed = (hasActive && !isSelected && !isHovered && !isConnHighlighted && !isDropTarget && !isClickSource) 
+      || isVlanDimmed 
+      || (isSearchActive && !matchesSearch);
 
-    // Sizing: With full-screen width, ports scale generously so all 48 ports fit and labels are 100% readable
+    // Dimensionado
     const sizeClasses = viewMode === 'all_visible'
       ? (portLayoutMode === 'single_row' && maxPortsInRack > 24
-          ? 'w-9 sm:w-10 h-14 sm:h-[58px] text-[9px]'
-          : 'flex-1 min-w-[36px] sm:min-w-[42px] max-w-[58px] h-14 sm:h-[58px] text-[10px]')
-      : 'w-11 sm:w-12 h-14 sm:h-[58px] text-[10px]';
+          ? 'w-9 sm:w-10 h-16 sm:h-[66px] text-[9px]'
+          : 'flex-1 min-w-[38px] sm:min-w-[44px] max-w-[62px] h-16 sm:h-[66px] text-[10px]')
+      : 'w-11 sm:w-12 h-16 sm:h-[66px] text-[10px]';
+
+    // Coloración del puerto según VLAN y ocupación
+    const dynamicStyle: React.CSSProperties = {};
+    if (isColoredByVlan && swVlan?.vlan_color) {
+      dynamicStyle.borderColor = swVlan.vlan_color;
+      dynamicStyle.backgroundColor = `${swVlan.vlan_color}24`;
+    } else if (nvrUplink) {
+      dynamicStyle.borderColor = '#f59e0b';
+      dynamicStyle.backgroundColor = '#78350f33';
+    } else {
+      dynamicStyle.borderColor = '#475569';
+      dynamicStyle.backgroundColor = '#1e293b66';
+    }
 
     return (
       <button
@@ -1607,8 +1801,11 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
         }}
         onMouseEnter={() => handlePortMouseEnter(eq.id, pNum)}
         onMouseLeave={handlePortMouseLeave}
-        className={`flex flex-col items-center justify-between p-1 rounded border text-center transition-all cursor-grab active:cursor-grabbing relative shrink-0 z-40 select-none overflow-hidden ${sizeClasses} ${
-          matchesVlanFilter
+        style={dynamicStyle}
+        className={`flex flex-col items-center justify-between p-1 rounded-md border text-center transition-all cursor-grab active:cursor-grabbing relative shrink-0 z-40 select-none overflow-hidden ${sizeClasses} ${
+          matchesSearch
+            ? 'ring-2 ring-yellow-400 bg-yellow-950/90 scale-105 shadow-xl border-yellow-400 animate-pulse'
+            : matchesVlanFilter
             ? 'ring-2 ring-white scale-105 shadow-lg border-white'
             : isDropTarget
             ? 'border-amber-400 bg-amber-950 ring-2 ring-amber-400 scale-105 shadow-lg'
@@ -1617,86 +1814,82 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
             : isSelected 
             ? 'bg-blue-600 border-blue-300 text-white ring-2 ring-blue-400 scale-105 shadow-md'
             : isConnHighlighted
-            ? 'bg-blue-950 border-blue-400 text-blue-200 ring-2 ring-blue-400'
+            ? 'ring-2 ring-cyan-400 shadow-md'
             : nvrUplink
-            ? 'bg-amber-950/90 border-amber-500 text-amber-200 ring-1 ring-amber-400'
-            : entity
-            ? 'bg-slate-900 border-blue-600/70 text-blue-200 hover:border-blue-400'
-            : 'bg-slate-800/70 border-slate-700 text-slate-400 hover:bg-slate-800 hover:border-slate-500'
-        } ${isDimmed ? 'opacity-35' : 'opacity-100'}`}
+            ? 'ring-1 ring-amber-400'
+            : isOccupied
+            ? 'hover:brightness-125'
+            : 'text-slate-400 hover:bg-slate-800 hover:border-slate-500'
+        } ${isDimmed ? 'opacity-25' : 'opacity-100'}`}
         title={
           nvrUplink 
-            ? `Puerto ${pNum}: Uplink NVR` 
-            : entity 
-            ? `Puerto ${pNum}: ${entity.codigo} (${entity.tipo === 'camara' ? 'Cámara CCTV' : entity.subtitulo || 'Punto de Red'})${swVlan?.vlan_numero ? ` · VLAN ${swVlan.vlan_numero} (${swVlan.vlan_nombre || ''})` : ''}` 
-            : swVlan?.vlan_numero 
-            ? `Puerto ${pNum}: Disponible · VLAN ${swVlan.vlan_numero} (${swVlan.vlan_nombre || ''} - ${swVlan.uso || ''})` 
-            : `Puerto ${pNum}: Disponible (Arrastra para enlazar)`
+            ? `Puerto ${pNum}: Uplink NVR (${equipos.find(e => e.id === nvrUplink.nvrId)?.codigo || 'NVR'})` 
+            : isOccupied 
+            ? `Puerto ${pNum}: ${displayCode} (${occupantLabel})${swVlan?.vlan_numero ? ` · VLAN ${swVlan.vlan_numero} (${swVlan.vlan_nombre || ''})` : ' · Sin VLAN'}` 
+            : `Puerto ${pNum}: Libre / Disponible (Arrastra para enlazar)`
         }
       >
-        {/* Graphical VLAN Color Bar indicator at top of port */}
-        {swVlan?.vlan_numero ? (
+        {/* Barra superior con color de VLAN (solo si tiene VLAN) */}
+        {isColoredByVlan && swVlan?.vlan_color ? (
           <div 
-            className="w-full h-1 rounded-t -mt-1 -mx-1 mb-0.5 shrink-0" 
-            style={{ backgroundColor: swVlan.vlan_color || '#3b82f6' }}
+            className="w-full h-1 rounded-t -mt-1 -mx-1 mb-0.5 shrink-0 shadow-2xs" 
+            style={{ backgroundColor: swVlan.vlan_color }}
             title={`VLAN ${swVlan.vlan_numero}: ${swVlan.vlan_nombre || ''}`}
           />
         ) : (
           <div className="w-full h-0.5 -mt-1 -mx-1 mb-0.5 shrink-0 opacity-0" />
         )}
 
-        <span className="font-mono font-bold leading-none text-[10px] sm:text-[11px] text-slate-100">
-          {String(pNum).padStart(2, '0')}
-        </span>
+        {/* Fila Superior: Número de puerto + Ícono de ocupante */}
+        <div className="flex items-center justify-between w-full px-0.5 leading-none">
+          <span className="font-mono font-bold text-[10px] sm:text-[11px] text-slate-100">
+            {String(pNum).padStart(2, '0')}
+          </span>
+          {occupantIcon}
+        </div>
 
-        {/* RJ45 socket representation with VLAN-aware LED indicator */}
+        {/* Conector RJ45 con LED coloreado por VLAN */}
         <div className="w-4 sm:w-5 h-2.5 sm:h-3 bg-black/90 border border-slate-700 rounded-xs flex items-center justify-center my-0.5 pointer-events-none">
           <span 
             className="w-2 sm:w-2.5 h-1 rounded-2xs" 
             style={{
-              backgroundColor: nvrUplink 
-                ? '#fbbf24' 
-                : entity 
-                ? (isSelected ? '#ffffff' : isConnHighlighted ? '#22d3ee' : (swVlan?.vlan_color || '#60a5fa'))
-                : (swVlan?.vlan_color ? `${swVlan.vlan_color}aa` : '#334155')
+              backgroundColor: isColoredByVlan && swVlan?.vlan_color
+                ? swVlan.vlan_color
+                : nvrUplink
+                ? '#fbbf24'
+                : '#475569'
             }}
           />
         </div>
 
-        {/* Bottom Label: Entity code (Camera / Punto Red), VLAN badge, or Libre */}
-        <div className="flex flex-col items-center justify-center w-full min-h-[14px] pointer-events-none leading-none px-0.5">
-          {nvrUplink ? (
-            <span className="text-[8px] sm:text-[8.5px] font-mono font-bold text-amber-300">NVR-UP</span>
-          ) : entity ? (
-            <div className="flex items-center justify-center gap-0.5 w-full">
-              <span className="text-[8px] sm:text-[8.5px] font-mono font-bold tracking-tight truncate max-w-full text-slate-100">
-                {entity.codigo.length > 7 ? entity.codigo.replace('CAM-ENG-P2-', 'C-') : entity.codigo}
+        {/* Fila Inferior: Código del dispositivo + Número de VLAN legible a simple vista */}
+        <div className="flex flex-col items-center justify-center w-full min-h-[16px] pointer-events-none leading-none px-0.5">
+          {isOccupied ? (
+            <>
+              <span className="text-[8px] sm:text-[8.5px] font-mono font-bold tracking-tight truncate max-w-full text-white drop-shadow-xs">
+                {displayCode || (nvrUplink ? 'NVR-UP' : 'OCUPADO')}
               </span>
-              {swVlan?.vlan_numero && (
+              {hasVlan && swVlan?.vlan_numero ? (
                 <span 
-                  className="text-[6.5px] sm:text-[7px] font-mono font-black px-0.5 py-0 rounded-2xs leading-none shrink-0"
-                  style={{ 
-                    backgroundColor: `${swVlan.vlan_color || '#3b82f6'}33`, 
+                  className="text-[7px] sm:text-[7.5px] font-mono font-black tracking-tight leading-none px-1 py-0.5 rounded-2xs mt-0.5 shadow-2xs"
+                  style={{
+                    backgroundColor: '#000000cc',
                     color: swVlan.vlan_color || '#38bdf8',
-                    border: `1px solid ${swVlan.vlan_color || '#0284c7'}66`
+                    border: `1px solid ${swVlan.vlan_color || '#38bdf8'}88`
                   }}
                 >
-                  V{swVlan.vlan_numero}
+                  VLAN {swVlan.vlan_numero}
+                </span>
+              ) : (
+                <span className="text-[7px] sm:text-[7.5px] font-mono font-medium text-slate-400 mt-0.5">
+                  Sin VLAN
                 </span>
               )}
-            </div>
-          ) : swVlan?.vlan_numero ? (
-            <span 
-              className="text-[7.5px] sm:text-[8px] font-mono font-bold truncate max-w-full leading-none px-0.5 py-0.2 rounded-2xs"
-              style={{ 
-                backgroundColor: `${swVlan.vlan_color || '#3b82f6'}26`, 
-                color: swVlan.vlan_color || '#38bdf8' 
-              }}
-            >
-              VLAN {swVlan.vlan_numero}
-            </span>
+            </>
           ) : (
-            <span className="text-[8px] sm:text-[8.5px] font-mono font-medium text-slate-500">LIBRE</span>
+            <span className="text-[8px] sm:text-[8.5px] font-mono font-medium text-slate-500">
+              LIBRE
+            </span>
           )}
         </div>
       </button>
@@ -1778,23 +1971,189 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
             </div>
           )}
 
-          {/* Search Box */}
+          {/* Search Box with Real-time Floating Dropdown */}
           <div className="relative">
             <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
             <input
               type="text"
-              placeholder="Buscar cámara, IP..."
+              placeholder="Buscar cámara, punto, IP, MAC..."
               value={searchFilter}
-              onChange={(e) => setSearchFilter(e.target.value)}
-              className="pl-8 pr-3 py-1.5 border border-slate-300 rounded text-xs w-36 sm:w-48 focus:outline-hidden focus:ring-1 focus:ring-blue-500 bg-white"
+              onChange={(e) => {
+                setSearchFilter(e.target.value);
+                setIsSearchOpen(true);
+              }}
+              onFocus={() => setIsSearchOpen(true)}
+              className="pl-8 pr-7 py-1.5 border border-slate-300 rounded text-xs w-44 sm:w-60 focus:outline-hidden focus:ring-1 focus:ring-blue-500 bg-white"
             />
             {searchFilter && (
               <button 
-                onClick={() => setSearchFilter('')}
-                className="absolute right-2 top-2 text-slate-400 hover:text-slate-600 text-xs cursor-pointer"
+                onClick={() => {
+                  setSearchFilter('');
+                  setIsSearchOpen(false);
+                }}
+                className="absolute right-2 top-2 text-slate-400 hover:text-slate-600 text-xs font-bold cursor-pointer"
               >
                 ×
               </button>
+            )}
+
+            {/* Click outside backdrop for search dropdown */}
+            {isSearchOpen && searchFilter.trim().length > 0 && (
+              <div 
+                className="fixed inset-0 z-40" 
+                onClick={() => setIsSearchOpen(false)} 
+              />
+            )}
+
+            {/* Search Results Dropdown */}
+            {isSearchOpen && searchFilter.trim().length > 0 && (
+              <div className="absolute right-0 top-full mt-1.5 w-80 sm:w-96 bg-white border border-slate-200 rounded-lg shadow-xl z-50 overflow-hidden font-mono text-xs max-h-96 overflow-y-auto">
+                <div className="p-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between text-[11px] text-slate-600 font-sans">
+                  <span>Resultados para "{searchFilter}"</span>
+                  <span className="font-bold text-slate-800 font-mono">
+                    {searchResults.totalCount} {searchResults.totalCount === 1 ? 'coincidencia' : 'coincidencias'}
+                  </span>
+                </div>
+
+                {searchResults.totalCount === 0 ? (
+                  <div className="p-4 text-center text-slate-500 text-[11px] font-sans">
+                    No se encontraron cámaras ni puntos de red coincidentes.
+                  </div>
+                ) : (
+                  <div className="divide-y divide-slate-100">
+                    {/* Cameras */}
+                    {searchResults.cameras.length > 0 && (
+                      <div className="p-1">
+                        <span className="px-2 py-1 text-[10px] uppercase font-bold text-slate-400 block tracking-wider">
+                          Cámaras CCTV ({searchResults.cameras.length})
+                        </span>
+                        {searchResults.cameras.map(cam => {
+                          const pp = cam.patch_panel_id ? equipos.find(e => e.id === cam.patch_panel_id) : null;
+                          const sw = cam.switch_id ? equipos.find(e => e.id === cam.switch_id) : null;
+                          const swNum = parseSwitchPortNumber(cam.puerto_switch);
+
+                          return (
+                            <button
+                              key={`search-cam-${cam.id}`}
+                              type="button"
+                              onClick={() => {
+                                setIsSearchOpen(false);
+                                setShowInspector(true);
+                                if (pp && cam.puerto_patch) {
+                                  handlePortClick(pp, cam.puerto_patch);
+                                  scrollToPort(pp.id, cam.puerto_patch);
+                                } else if (sw && swNum) {
+                                  handlePortClick(sw, swNum);
+                                  scrollToPort(sw.id, swNum);
+                                }
+                              }}
+                              className="w-full text-left p-2 hover:bg-blue-50/70 rounded transition-colors flex items-center justify-between gap-2 cursor-pointer group"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="p-1 rounded bg-cyan-100 text-cyan-700 shrink-0">
+                                  <Camera className="w-3.5 h-3.5" />
+                                </span>
+                                <div className="min-w-0">
+                                  <span className="font-bold text-slate-900 block truncate group-hover:text-blue-700">
+                                    {cam.codigo}
+                                  </span>
+                                  <span className="text-[10px] text-slate-500 block truncate font-sans">
+                                    {cam.marca_rel?.nombre || cam.marca || 'CCTV'} · {cam.direccion_ip || 'Sin IP'}
+                                    {cam.ubicacion_especifica ? ` · ${cam.ubicacion_especifica}` : ''}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="text-[10px] text-right font-mono text-slate-600 shrink-0">
+                                {pp && cam.puerto_patch ? (
+                                  <span className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200">
+                                    {pp.codigo} P{cam.puerto_patch}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400 italic">Sin puerto</span>
+                                )}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Puntos de Red */}
+                    {searchResults.puntos.length > 0 && (
+                      <div className="p-1">
+                        <span className="px-2 py-1 text-[10px] uppercase font-bold text-slate-400 block tracking-wider">
+                          Puntos de Red ({searchResults.puntos.length})
+                        </span>
+                        {searchResults.puntos.map(pto => {
+                          const pp = pto.patch_panel_id ? equipos.find(e => e.id === pto.patch_panel_id) : null;
+                          const sw = pto.switch_id ? equipos.find(e => e.id === pto.switch_id) : null;
+                          let swNum: number | null = null;
+                          if (pto.puerto_switch_id) {
+                            const sp = switchPortsOccupation.find(s => s.puerto_switch_id === pto.puerto_switch_id);
+                            if (sp) swNum = sp.numero_puerto;
+                          }
+
+                          return (
+                            <button
+                              key={`search-pto-${pto.id}`}
+                              type="button"
+                              onClick={() => {
+                                setIsSearchOpen(false);
+                                setShowInspector(true);
+                                if (pp && pto.puerto_patch) {
+                                  handlePortClick(pp, pto.puerto_patch);
+                                  scrollToPort(pp.id, pto.puerto_patch);
+                                } else if (sw && swNum) {
+                                  handlePortClick(sw, swNum);
+                                  scrollToPort(sw.id, swNum);
+                                }
+                              }}
+                              className="w-full text-left p-2 hover:bg-cyan-50/70 rounded transition-colors flex items-center justify-between gap-2 cursor-pointer group"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className={`p-1 rounded shrink-0 ${
+                                  pto.tipo_punto === 'wifi_ap'
+                                    ? 'bg-indigo-100 text-indigo-700'
+                                    : pto.tipo_punto === 'datos_alumno'
+                                    ? 'bg-emerald-100 text-emerald-700'
+                                    : 'bg-blue-100 text-blue-700'
+                                }`}>
+                                  {pto.tipo_punto === 'wifi_ap' ? (
+                                    <Wifi className="w-3.5 h-3.5" />
+                                  ) : pto.tipo_punto === 'datos_alumno' ? (
+                                    <GraduationCap className="w-3.5 h-3.5" />
+                                  ) : (
+                                    <Briefcase className="w-3.5 h-3.5" />
+                                  )}
+                                </span>
+                                <div className="min-w-0">
+                                  <span className="font-bold text-slate-900 block truncate group-hover:text-cyan-800">
+                                    {pto.codigo}
+                                  </span>
+                                  <span className="text-[10px] text-slate-500 block truncate font-sans">
+                                    {pto.tipo_punto === 'wifi_ap' ? 'WiFi AP' : pto.tipo_punto === 'datos_alumno' ? 'Datos Alumno' : 'Datos Funcionario'}
+                                    {pto.direccion_ip ? ` · IP: ${pto.direccion_ip}` : ''}
+                                    {pto.ubicacion_especifica ? ` · ${pto.ubicacion_especifica}` : ''}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="text-[10px] text-right font-mono text-slate-600 shrink-0">
+                                {pp && pto.puerto_patch ? (
+                                  <span className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200">
+                                    {pp.codigo} P{pto.puerto_patch}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400 italic">Sin puerto</span>
+                                )}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
           </div>
 
@@ -1955,6 +2314,50 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
           </div>
         </div>
       )}
+
+      {/* LEYENDA VISIBLE DE ÍCONOS DE OCUPANTES */}
+      <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 text-white flex flex-wrap items-center justify-between gap-3 shadow-xs font-mono text-xs">
+        <div className="flex items-center gap-2">
+          <span className="p-1 bg-slate-800 text-slate-300 rounded border border-slate-700">
+            <Tag className="w-3.5 h-3.5 text-blue-400" />
+          </span>
+          <div>
+            <span className="text-[11px] font-bold text-slate-200 uppercase tracking-tight block">
+              Leyenda de Ocupantes (RJ45):
+            </span>
+            <span className="text-[10px] text-slate-400 font-sans block">
+              Identificación visual por tipo de dispositivo conectado en el puerto
+            </span>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2.5 sm:gap-4 flex-wrap text-[11px]">
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-800/80 border border-slate-700 text-slate-200" title="Cámara de Videovigilancia CCTV">
+            <Camera className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+            <span className="font-medium">Cámara CCTV</span>
+          </div>
+
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-800/80 border border-slate-700 text-slate-200" title="Punto de Red para Datos de Funcionarios / Personal">
+            <Briefcase className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+            <span className="font-medium">Datos Funcionario</span>
+          </div>
+
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-800/80 border border-slate-700 text-slate-200" title="Punto de Red para Datos de Alumnos / Sala de Clases">
+            <GraduationCap className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            <span className="font-medium">Datos Alumno</span>
+          </div>
+
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-800/80 border border-slate-700 text-slate-200" title="Punto de Acceso Inalámbrico WiFi AP">
+            <Wifi className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+            <span className="font-medium">AP WiFi</span>
+          </div>
+
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-slate-800/40 border border-slate-700/60 text-slate-400" title="Puerto sin VLAN asignada o sin dispositivo conectado">
+            <span className="w-3 h-3 rounded-2xs bg-slate-700 border border-slate-600 inline-block shrink-0" />
+            <span className="text-[10px]">Sin VLAN / Libre (Gris, sin ícono)</span>
+          </div>
+        </div>
+      </div>
 
       {/* Main Container: Full Width Diagram Canvas + Inspector Panel */}
       <div className="flex flex-col lg:flex-row gap-5 items-start w-full">
@@ -2235,11 +2638,21 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
               <div className="space-y-8 relative z-10">
                 {rackBayEquipos.map((eq) => {
                   const isSwitch = eq.tipo === 'switch';
-                  const totalPorts = eq.puertos_totales || 24;
+                  const rj45Ports = isSwitch
+                    ? (switchPortsOccupation.filter(sp => sp.switch_id === eq.id && sp.tipo_puerto !== 'sfp').map(sp => sp.numero_puerto).sort((a, b) => a - b))
+                    : [];
+                  const totalRj45Count = isSwitch 
+                    ? (rj45Ports.length > 0 ? rj45Ports.length : (eq.puertos_totales || 24))
+                    : (eq.puertos_totales || 24);
+
+                  const portList: number[] = isSwitch && rj45Ports.length > 0
+                    ? rj45Ports
+                    : Array.from({ length: totalRj45Count }, (_, i) => i + 1);
+
                   const uPos = eq.posicion_u_inicio ?? eq.posicion_u_fin;
 
                   let connectedCount = 0;
-                  for (let p = 1; p <= totalPorts; p++) {
+                  for (const p of portList) {
                     const k = makePortKey(eq.id, p);
                     if (isSwitch ? switchPortToEntity[k] : patchPortToEntity[k]) {
                       connectedCount++;
@@ -2304,23 +2717,23 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
                               >
                                 P01
                               </button>
-                              {totalPorts >= 24 && (
+                              {totalRj45Count >= 24 && (
                                 <>
                                   <button
                                     type="button"
-                                    onClick={() => scrollToPort(eq.id, Math.floor(totalPorts / 2))}
+                                    onClick={() => scrollToPort(eq.id, Math.floor(totalRj45Count / 2))}
                                     className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-blue-600 text-slate-200 hover:text-white border border-slate-700 transition-colors cursor-pointer"
-                                    title={`Desplazar a puerto ${Math.floor(totalPorts / 2)}`}
+                                    title={`Desplazar a puerto ${Math.floor(totalRj45Count / 2)}`}
                                   >
-                                    P{Math.floor(totalPorts / 2)}
+                                    P{Math.floor(totalRj45Count / 2)}
                                   </button>
                                   <button
                                     type="button"
-                                    onClick={() => scrollToPort(eq.id, totalPorts)}
+                                    onClick={() => scrollToPort(eq.id, totalRj45Count)}
                                     className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-blue-600 text-slate-200 hover:text-white border border-slate-700 transition-colors cursor-pointer"
-                                    title={`Desplazar a puerto ${totalPorts}`}
+                                    title={`Desplazar a puerto ${totalRj45Count}`}
                                   >
-                                    P{totalPorts}
+                                    P{totalRj45Count}
                                   </button>
                                 </>
                               )}
@@ -2328,7 +2741,7 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
                           )}
 
                           {(() => {
-                            const occPct = totalPorts > 0 ? Math.round((connectedCount / totalPorts) * 100) : 0;
+                            const occPct = totalRj45Count > 0 ? Math.round((connectedCount / totalRj45Count) * 100) : 0;
                             const occ = getOccupancyStatus(occPct);
                             return (
                               <div className="flex items-center gap-2">
@@ -2346,11 +2759,11 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
                                     occ.status === 'critico' ? 'bg-rose-400' : occ.status === 'alerta' ? 'bg-amber-400' : 'bg-emerald-400'
                                   }`} />
                                   <span>{occPct}%</span>
-                                  <span className="hidden sm:inline font-normal opacity-90">({connectedCount}/{totalPorts})</span>
+                                  <span className="hidden sm:inline font-normal opacity-90">({connectedCount}/{totalRj45Count})</span>
                                 </div>
                                 <div className="text-right text-[11px] font-mono hidden md:block">
                                   <span className="text-slate-300 font-bold block text-[10px]">
-                                    {totalPorts - connectedCount} libres
+                                    {totalRj45Count - connectedCount} libres
                                   </span>
                                 </div>
                               </div>
@@ -2370,10 +2783,10 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
                         {portLayoutMode === 'single_row' ? (
                           /* 1. SINGLE ROW MODE: 1 continuous horizontal sequence */
                           <div className={`flex items-center gap-1.5 ${isIndependent ? 'min-w-max' : 'w-full'}`}>
-                            {Array.from({ length: totalPorts }, (_, i) => i + 1).map((pNum) => (
+                            {portList.map((pNum, idx) => (
                               <React.Fragment key={`port-wrap-${eq.id}-${pNum}`}>
                                 {renderPortButton(eq, pNum)}
-                                {pNum % 6 === 0 && pNum < totalPorts && (
+                                {(idx + 1) % 6 === 0 && idx + 1 < portList.length && (
                                   <div className="h-10 w-px bg-slate-700 mx-0.5 shrink-0" />
                                 )}
                               </React.Fragment>
@@ -2382,34 +2795,38 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
                         ) : (
                           /* 2. DUAL ROW MODE: 48 ports fit in only 24 columns, perfectly fitting on any screen! */
                           <div className={`flex flex-col gap-2 ${isIndependent ? 'min-w-max' : 'w-full'}`}>
-                            {/* Row 1: Odds (1, 3, 5... 47) */}
-                            <div className="flex items-center gap-1.5 w-full">
-                              {Array.from({ length: Math.ceil(totalPorts / 2) }, (_, i) => i * 2 + 1).map((pNum) => {
-                                if (pNum > totalPorts) return null;
-                                return (
-                                  <React.Fragment key={`port-wrap-${eq.id}-${pNum}`}>
-                                    {renderPortButton(eq, pNum)}
-                                    {pNum % 12 === 11 && pNum < totalPorts && (
-                                      <div className="h-10 w-px bg-slate-700 mx-0.5 shrink-0" />
-                                    )}
-                                  </React.Fragment>
-                                );
-                              })}
-                            </div>
-                            {/* Row 2: Evens (2, 4, 6... 48) */}
-                            <div className="flex items-center gap-1.5 w-full">
-                              {Array.from({ length: Math.floor(totalPorts / 2) }, (_, i) => (i + 1) * 2).map((pNum) => {
-                                if (pNum > totalPorts) return null;
-                                return (
-                                  <React.Fragment key={`port-wrap-${eq.id}-${pNum}`}>
-                                    {renderPortButton(eq, pNum)}
-                                    {pNum % 12 === 0 && pNum < totalPorts && (
-                                      <div className="h-10 w-px bg-slate-700 mx-0.5 shrink-0" />
-                                    )}
-                                  </React.Fragment>
-                                );
-                              })}
-                            </div>
+                            {/* Row 1: Odds */}
+                            {(() => {
+                              const oddPorts = portList.filter((_, idx) => idx % 2 === 0);
+                              return (
+                                <div className="flex items-center gap-1.5 w-full">
+                                  {oddPorts.map((pNum, idx) => (
+                                    <React.Fragment key={`port-wrap-${eq.id}-${pNum}`}>
+                                      {renderPortButton(eq, pNum)}
+                                      {(idx + 1) % 6 === 0 && idx + 1 < oddPorts.length && (
+                                        <div className="h-10 w-px bg-slate-700 mx-0.5 shrink-0" />
+                                      )}
+                                    </React.Fragment>
+                                  ))}
+                                </div>
+                              );
+                            })()}
+                            {/* Row 2: Evens */}
+                            {(() => {
+                              const evenPorts = portList.filter((_, idx) => idx % 2 === 1);
+                              return (
+                                <div className="flex items-center gap-1.5 w-full">
+                                  {evenPorts.map((pNum, idx) => (
+                                    <React.Fragment key={`port-wrap-${eq.id}-${pNum}`}>
+                                      {renderPortButton(eq, pNum)}
+                                      {(idx + 1) % 6 === 0 && idx + 1 < evenPorts.length && (
+                                        <div className="h-10 w-px bg-slate-700 mx-0.5 shrink-0" />
+                                      )}
+                                    </React.Fragment>
+                                  ))}
+                                </div>
+                              );
+                            })()}
                           </div>
                         )}
                       </div>
@@ -2899,36 +3316,84 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
 
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500 font-medium">Tipo de Servicio:</span>
-                    <span className="font-mono font-semibold text-slate-800 capitalize">
-                      {selectedPort.puntoRed.tipo_punto === 'datos_funcionario'
-                        ? 'Datos Funcionario'
-                        : selectedPort.puntoRed.tipo_punto === 'wifi_ap'
-                        ? 'WiFi AP / Punto de Acceso'
-                        : 'Punto de Sala'}
+                    <span className="font-mono font-semibold text-slate-800 flex items-center gap-1.5">
+                      {selectedPort.puntoRed.tipo_punto === 'datos_funcionario' ? (
+                        <>
+                          <Briefcase className="w-3.5 h-3.5 text-blue-600" />
+                          <span>Datos Funcionario</span>
+                        </>
+                      ) : selectedPort.puntoRed.tipo_punto === 'wifi_ap' ? (
+                        <>
+                          <Wifi className="w-3.5 h-3.5 text-indigo-600" />
+                          <span>AP WiFi</span>
+                        </>
+                      ) : (
+                        <>
+                          <GraduationCap className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Datos Alumno</span>
+                        </>
+                      )}
                     </span>
                   </div>
 
-                  {selectedPort.vlan && (
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-500 font-medium">VLAN de Switch:</span>
+                  {/* VLAN info */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500 font-medium">VLAN de Switch:</span>
+                    {selectedPort.vlan ? (
                       <span 
-                        className="font-mono font-bold px-2 py-0.5 rounded text-xs"
+                        className="font-mono font-bold px-2 py-0.5 rounded text-xs inline-flex items-center gap-1.5"
                         style={{
-                          backgroundColor: `${selectedPort.vlan.color || '#3b82f6'}26`,
-                          color: selectedPort.vlan.color || '#0284c7'
+                          backgroundColor: `${selectedPort.vlan.color || '#3b82f6'}20`,
+                          borderColor: `${selectedPort.vlan.color || '#3b82f6'}60`,
+                          color: selectedPort.vlan.color || '#0284c7',
+                          borderWidth: 1
                         }}
                       >
-                        VLAN {selectedPort.vlan.numero} {selectedPort.vlan.nombre ? `(${selectedPort.vlan.nombre})` : ''}
+                        <span className="w-2 h-2 rounded-full" style={{ backgroundColor: selectedPort.vlan.color || '#3b82f6' }} />
+                        <span>VLAN {selectedPort.vlan.numero} {selectedPort.vlan.nombre ? `(${selectedPort.vlan.nombre})` : ''}</span>
                       </span>
-                    </div>
-                  )}
+                    ) : (
+                      <span className="text-slate-400 font-mono text-xs italic">Sin VLAN asignada</span>
+                    )}
+                  </div>
 
                   <div className="pt-1 border-t border-slate-100">
-                    <span className="text-slate-500 font-medium block mb-0.5">Ubicación Específica:</span>
+                    <span className="text-slate-500 font-medium block mb-0.5">Ubicación Física:</span>
                     <span className="font-mono text-slate-800 text-[11px] block bg-slate-50 p-2 rounded border border-slate-200">
                       {selectedPort.puntoRed.ubicacion_especifica || 'Sin descripción de ubicación registrada'}
                     </span>
                   </div>
+
+                  {/* SI ES AP WIFI: MOSTRAR MARCA, MODELO, MAC, IP */}
+                  {selectedPort.puntoRed.tipo_punto === 'wifi_ap' && (
+                    <div className="p-3 bg-indigo-50/70 border border-indigo-200 rounded-lg space-y-2 text-[11px] font-mono mt-2">
+                      <div className="text-indigo-950 font-bold flex items-center gap-1.5 border-b border-indigo-200/80 pb-1.5">
+                        <Wifi className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>Detalles del Access Point (WiFi AP)</span>
+                      </div>
+
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500 font-sans font-medium">Marca & Modelo:</span>
+                        <span className="font-mono font-semibold text-slate-900">
+                          {selectedPort.puntoRed.marca_rel?.nombre || (selectedPort.puntoRed as any).marca || '-'} {selectedPort.puntoRed.modelo_rel?.nombre || (selectedPort.puntoRed as any).modelo || ''}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500 font-sans font-medium">Dirección IP:</span>
+                        <span className="font-mono font-bold text-indigo-700">
+                          {selectedPort.puntoRed.direccion_ip || 'No asignada'}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500 font-sans font-medium">Dirección MAC:</span>
+                        <span className="font-mono text-slate-700">
+                          {selectedPort.puntoRed.direccion_mac || 'No registrada'}
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Actions: Disconnect */}

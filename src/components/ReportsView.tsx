@@ -22,7 +22,8 @@ import {
   Info,
   MapPin,
   FileText,
-  Wrench
+  Wrench,
+  LayoutDashboard
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Equipo, Camara, Rack, Piso, Edificio, Campus, Sede } from '../types/database';
@@ -30,6 +31,7 @@ import { calculateEquipmentOccupancy, EquipmentOccupancyInfo, OccupancyStatus } 
 import { exportReportToExcel, exportReportToPdf, ReportFilterItem, ReportKpiSummaryItem } from '../utils/reportExport';
 import { LocationInventoryReport } from './LocationInventoryReport';
 import { DeviceInterventionsReport } from './DeviceInterventionsReport';
+import { ExecutiveDashboard } from './ExecutiveDashboard';
 
 interface ReportsViewProps {
   onSelectRack?: (rack: Rack) => void;
@@ -42,7 +44,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   onNavigateToPorts,
   onSelectCamera,
 }) => {
-  const [activeTab, setActiveTab] = useState<'ocupacion' | 'ubicacion' | 'intervenciones'>('ocupacion');
+  const [activeTab, setActiveTab] = useState<'ejecutivo' | 'ocupacion' | 'ubicacion' | 'intervenciones'>('ejecutivo');
   const [loading, setLoading] = useState(true);
   const [equipos, setEquipos] = useState<Equipo[]>([]);
   const [camaras, setCamaras] = useState<Camara[]>([]);
@@ -442,6 +444,19 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         <div className="flex items-center gap-2 overflow-x-auto">
           <button
             type="button"
+            onClick={() => setActiveTab('ejecutivo')}
+            className={`px-4 py-2.5 text-xs font-bold font-mono border-b-2 transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+              activeTab === 'ejecutivo'
+                ? 'border-blue-600 text-blue-600 bg-blue-50/30'
+                : 'border-transparent text-slate-600 hover:text-slate-900 hover:border-slate-300'
+            }`}
+          >
+            <LayoutDashboard className="w-4 h-4" />
+            <span>Dashboard Ejecutivo</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setActiveTab('ocupacion')}
             className={`px-4 py-2.5 text-xs font-bold font-mono border-b-2 transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
               activeTab === 'ocupacion'
@@ -508,6 +523,13 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           </div>
         )}
       </div>
+
+      {activeTab === 'ejecutivo' && (
+        <ExecutiveDashboard 
+          onSelectRack={onSelectRack} 
+          onNavigateToPorts={onNavigateToPorts} 
+        />
+      )}
 
       {activeTab === 'ocupacion' && (
         <div className="space-y-6">
