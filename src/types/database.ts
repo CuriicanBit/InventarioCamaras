@@ -187,7 +187,7 @@ export type TipoIntervencion =
 
 export interface HistorialMantenimiento {
   id: string;
-  entidad_tipo: 'equipo' | 'camara' | 'rack';
+  entidad_tipo: 'equipo' | 'camara' | 'rack' | 'punto_red';
   entidad_id: string;
   tipo_intervencion: TipoIntervencion;
   fecha: string;
@@ -196,4 +196,98 @@ export interface HistorialMantenimiento {
   repuestos_insumos: string | null;
   ticket_referencia?: string | null;
   created_at: string;
+}
+
+export interface Vlan {
+  id: string;
+  numero: number;
+  nombre: string;
+  color: string;
+  descripcion?: string | null;
+  created_at: string;
+}
+
+export interface EnlaceSwitch {
+  id: string;
+  puerto_origen_id: string;
+  puerto_destino_id: string;
+  switch_origen_id: string;
+  switch_destino_id: string;
+  created_at: string;
+  switch_origen?: Equipo;
+  switch_destino?: Equipo;
+  puerto_origen?: PuertoSwitch;
+  puerto_destino?: PuertoSwitch;
+}
+
+export type TipoPuntoRed = 'datos_funcionario' | 'datos_alumno' | 'wifi_ap';
+export type CategoriaCable = 'cat6' | 'cat6a';
+
+export interface PuertoSwitch {
+  id: string;
+  switch_id: string;
+  numero_puerto: number;
+  tipo_puerto?: 'rj45' | 'sfp' | string;
+  vlan: number | null;
+  vlan_id?: string | null;
+  uso: string | null;
+  descripcion: string | null;
+  categoria_cable: string | null;
+  created_at: string;
+  vlan_rel?: Vlan;
+}
+
+export interface PuertoSwitchOcupacion {
+  puerto_switch_id: string;
+  switch_id: string;
+  numero_puerto: number;
+  tipo_puerto: 'rj45' | 'sfp' | string;
+  vlan?: number | null;
+  vlan_numero: number | null;
+  vlan_nombre: string | null;
+  vlan_color: string | null;
+  uso: string | null;
+  descripcion: string | null;
+  ocupado_por_codigo: string | null;
+  ocupado_por_tipo: string | null;
+}
+
+export interface PuntoRed {
+  id: string;
+  codigo: string;
+  tipo_punto: TipoPuntoRed;
+  piso_id: string | null;
+  ubicacion_especifica: string | null;
+  rack_id: string | null;
+  patch_panel_id: string | null;
+  puerto_patch: number | null;
+  switch_id: string | null;
+  puerto_switch_id: string | null;
+  categoria_cable: CategoriaCable | null;
+  marca_id: string | null;
+  modelo_id: string | null;
+  numero_serie: string | null;
+  direccion_mac: string | null;
+  direccion_ip: string | null;
+  fecha_compra: string | null;
+  proveedor_compra_id: string | null;
+  fecha_instalacion: string | null;
+  proveedor_instalacion_id: string | null;
+  estado_ciclo_vida?: EstadoCicloVida | string;
+  posicion_x?: number | null;
+  posicion_y?: number | null;
+  azimut?: number | null;
+  apertura_fov?: number | null;
+  alcance_metros?: number | null;
+  created_at: string;
+  // Relational joins
+  piso?: Piso;
+  rack?: Rack;
+  patch_panel?: Equipo;
+  switch?: Equipo;
+  puerto_switch?: PuertoSwitch;
+  marca_rel?: Marca;
+  modelo_rel?: Modelo;
+  proveedor_compra?: Proveedor;
+  proveedor_instalacion?: Proveedor;
 }

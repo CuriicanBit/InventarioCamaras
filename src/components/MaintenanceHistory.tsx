@@ -15,17 +15,20 @@ import {
   Server, 
   Tag, 
   ShieldCheck,
-  RefreshCw
+  RefreshCw,
+  Network,
+  Wifi
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Camara, Equipo, Rack, HistorialMantenimiento, TipoIntervencion } from '../types/database';
+import { Camara, Equipo, Rack, PuntoRed, HistorialMantenimiento, TipoIntervencion } from '../types/database';
 
 interface MaintenanceHistoryProps {
-  entityType?: 'camara' | 'equipo' | 'rack';
+  entityType?: 'camara' | 'equipo' | 'rack' | 'punto_red';
   entityId?: string;
   camera?: Camara;
   equipo?: Equipo;
   rack?: Rack;
+  puntoRed?: PuntoRed;
   onBack: () => void;
 }
 
@@ -35,11 +38,24 @@ export const MaintenanceHistory: React.FC<MaintenanceHistoryProps> = ({
   camera,
   equipo,
   rack,
+  puntoRed,
   onBack,
 }) => {
   const [intervenciones, setIntervenciones] = useState<HistorialMantenimiento[]>([]);
   const [filterType, setFilterType] = useState<string>('all');
   const [loading, setLoading] = useState(true);
+
+  // Dispositivos asociados para cuando se gestiona bitácora de un rack
+  const [rackDevices, setRackDevices] = useState<{
+    id: string;
+    sourceType: 'equipo' | 'camara';
+    codigo: string;
+    tipoLabel: string;
+    marca: string;
+    modelo: string;
+    posicion?: string;
+  }[]>([]);
+  const [selectedAffectedDeviceIds, setSelectedAffectedDeviceIds] = useState<string[]>([]);
 
   // New intervention modal state
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -49,24 +65,87 @@ export const MaintenanceHistory: React.FC<MaintenanceHistoryProps> = ({
     tecnico_responsable: string;
     descripcion: string;
     repuestos_insumos: string;
+    ticket_referencia: string;
   }>({
     tipo_intervencion: 'mantenimiento_preventivo',
     fecha: new Date().toISOString().slice(0, 16),
     tecnico_responsable: 'Carlos Mendoza (TEC-042)',
     descripcion: '',
     repuestos_insumos: '',
+    ticket_referencia: '',
   });
   const [saving, setSaving] = useState(false);
 
-  const activeId = entityId || camera?.id || equipo?.id || rack?.id;
-  const activeCode = camera?.codigo || equipo?.codigo || (rack ? `Rack ${rack.codigo}` : 'DISPOSITIVO');
+  const activeId = entityId || camera?.id || equipo?.id || rack?.id || puntoRed?.id;
+  const activeCode = camera?.codigo || equipo?.codigo || (rack ? `Rack ${rack.codigo}` : (puntoRed ? `Punto de Red ${puntoRed.codigo}` : 'DISPOSITIVO'));
   const activeModel = camera 
     ? `${camera.marca || ''} ${camera.modelo || ''}` 
     : equipo 
     ? `${equipo.marca || ''} ${equipo.modelo || ''}` 
     : rack 
     ? `Bastidor ${rack.altura_u || 42}U (${rack.formato || 'Estándar 19"'})` 
+    : puntoRed
+    ? `${puntoRed.tipo_punto === 'wifi_ap' ? 'Access Point WiFi' : (puntoRed.tipo_punto === 'datos_funcionario' ? 'Punto de Datos Funcionario' : 'Punto de Datos Alumno')} · Cat ${puntoRed.categoria_cable?.toUpperCase() || 'Cat6'}`
     : '';
+
+  // Cargar dispositivos vinculados si se está viendo la bitácora de un rack
+  useEffect(() => {
+    if (entityType === 'rack' && activeId) {
+      const loadRackDevices = async () => {
+        try {
+          const [{ data: eqData }, { data: camData }] = await Promise.all([
+            supabase
+              .from('equipos')
+              .select('*, marca_rel:marcas(nombre), modelo_rel:modelos(nombre)')
+              .eq('rack_id', activeId)
+              .order('posicion_u_inicio'),
+            supabase
+              .from('camaras')
+              .select('*, marca_rel:marcas(nombre), modelo_rel:modelos(nombre)')
+              .eq('rack_id', activeId)
+              .order('codigo')
+          ]);
+
+          const list: any[] = [];
+          (eqData || []).forEach((eq: any) => {
+            let tipoLabel = 'Equipo';
+            if (eq.tipo === 'switch') tipoLabel = 'Switch PoE';
+            else if (eq.tipo === 'nvr') tipoLabel = 'Grabador NVR';
+            else if (eq.tipo === 'patch_panel') tipoLabel = 'Patch Panel';
+            else if (eq.tipo === 'ups') tipoLabel = 'UPS / Energía';
+            else if (eq.tipo) tipoLabel = String(eq.tipo).toUpperCase();
+
+            list.push({
+              id: eq.id,
+              sourceType: 'equipo',
+              codigo: eq.codigo,
+              tipoLabel,
+              marca: eq.marca_rel?.nombre || eq.marca || '-',
+              modelo: eq.modelo_rel?.nombre || eq.modelo || '-',
+              posicion: eq.posicion_u_inicio ? `U${eq.posicion_u_inicio}` : 'Piso / Shaft'
+            });
+          });
+
+          (camData || []).forEach((cam: any) => {
+            list.push({
+              id: cam.id,
+              sourceType: 'camara',
+              codigo: cam.codigo,
+              tipoLabel: cam.tipo_camara ? `Cámara ${cam.tipo_camara.toUpperCase()}` : 'Cámara CCTV',
+              marca: cam.marca_rel?.nombre || cam.marca || '-',
+              modelo: cam.modelo_rel?.nombre || cam.modelo || '-',
+              posicion: cam.ubicacion_especifica || 'Asociada al Rack'
+            });
+          });
+
+          setRackDevices(list);
+        } catch (e) {
+          console.error('Error loading rack devices for maintenance history:', e);
+        }
+      };
+      loadRackDevices();
+    }
+  }, [entityType, activeId]);
 
   const loadHistory = async () => {
     try {
@@ -136,6 +215,17 @@ export const MaintenanceHistory: React.FC<MaintenanceHistoryProps> = ({
     }
     try {
       setSaving(true);
+
+      const affected = entityType === 'rack' 
+        ? rackDevices.filter(d => selectedAffectedDeviceIds.includes(d.id))
+        : [];
+      let finalDescription = modalFormData.descripcion.trim();
+
+      if (affected.length > 0) {
+        const affectedNames = affected.map(d => `${d.codigo} (${d.tipoLabel} · ${d.marca} ${d.modelo})`).join('; ');
+        finalDescription = `[Dispositivos Afectados: ${affectedNames}]\n\n${finalDescription}`;
+      }
+
       const { data, error } = await supabase
         .from('historial_mantenimiento')
         .insert([
@@ -145,26 +235,56 @@ export const MaintenanceHistory: React.FC<MaintenanceHistoryProps> = ({
             tipo_intervencion: modalFormData.tipo_intervencion,
             fecha: new Date(modalFormData.fecha).toISOString(),
             tecnico_responsable: modalFormData.tecnico_responsable.trim(),
-            descripcion: modalFormData.descripcion.trim() || null,
+            descripcion: finalDescription || null,
             repuestos_insumos: modalFormData.repuestos_insumos.trim() || null,
+            ticket_referencia: modalFormData.ticket_referencia.trim() || null,
           }
         ])
         .select()
         .single();
 
       if (error) throw error;
+
+      // Registrar también eventos vinculados a cada dispositivo afectado
+      if (affected.length > 0) {
+        for (const dev of affected) {
+          try {
+            await supabase.from('historial_mantenimiento').insert([
+              {
+                entidad_tipo: dev.sourceType,
+                entidad_id: dev.id,
+                tipo_intervencion: modalFormData.tipo_intervencion,
+                fecha: new Date(modalFormData.fecha).toISOString(),
+                tecnico_responsable: modalFormData.tecnico_responsable.trim(),
+                descripcion: `[Intervención en Rack ${activeCode}] ${modalFormData.descripcion.trim() || 'Mantenimiento en gabinete'}`,
+                repuestos_insumos: modalFormData.repuestos_insumos.trim() || null,
+                ticket_referencia: modalFormData.ticket_referencia.trim() || `RACK-${activeCode}`,
+              }
+            ]);
+          } catch (linkErr) {
+            console.warn('Error vinculando mantenimiento a dispositivo:', linkErr);
+          }
+        }
+      }
+
       setIntervenciones(prev => [data, ...prev]);
       setIsModalOpen(false);
+      setSelectedAffectedDeviceIds([]);
       setModalFormData({
         tipo_intervencion: 'mantenimiento_preventivo',
         fecha: new Date().toISOString().slice(0, 16),
         tecnico_responsable: 'Carlos Mendoza (TEC-042)',
         descripcion: '',
         repuestos_insumos: '',
+        ticket_referencia: '',
       });
     } catch (err: any) {
       console.error('Error logging maintenance intervention:', err);
-      alert('Error al registrar intervención: ' + (err.message || 'Verifique los datos'));
+      if (err.message && err.message.includes('historial_mantenimiento_entidad_tipo_check')) {
+        alert('Aviso de Supabase: Para registrar bitácora en Racks, debes ejecutar en tu SQL Editor de Supabase:\n\nALTER TABLE historial_mantenimiento DROP CONSTRAINT IF EXISTS historial_mantenimiento_entidad_tipo_check;\nALTER TABLE historial_mantenimiento ADD CONSTRAINT historial_mantenimiento_entidad_tipo_check CHECK (entidad_tipo IN (\'equipo\', \'camara\', \'rack\'));');
+      } else {
+        alert('Error al registrar intervención: ' + (err.message || 'Verifique los datos'));
+      }
     } finally {
       setSaving(false);
     }
@@ -201,6 +321,12 @@ export const MaintenanceHistory: React.FC<MaintenanceHistoryProps> = ({
                 <Server className="w-5 h-5 text-blue-600" />
               ) : entityType === 'equipo' ? (
                 <Server className="w-5 h-5 text-emerald-600" />
+              ) : entityType === 'punto_red' ? (
+                puntoRed?.tipo_punto === 'wifi_ap' ? (
+                  <Wifi className="w-5 h-5 text-indigo-600" />
+                ) : (
+                  <Network className="w-5 h-5 text-cyan-600" />
+                )
               ) : (
                 <Camera className="w-5 h-5 text-blue-600" />
               )}
@@ -216,6 +342,8 @@ export const MaintenanceHistory: React.FC<MaintenanceHistoryProps> = ({
             <p className="text-xs text-slate-500 font-mono mt-0.5">
               {entityType === 'rack'
                 ? `${rack?.ubicacion_especifica || 'Sala Técnica'} · ${rack?.formato || 'Bastidor Estándar 19"'} · Capacidad ${rack?.altura_u || 42}U`
+                : entityType === 'punto_red'
+                ? `${puntoRed?.ubicacion_especifica || 'Punto en terreno'} · ${puntoRed?.tipo_punto === 'wifi_ap' ? 'Access Point WiFi' : (puntoRed?.tipo_punto === 'datos_funcionario' ? 'Datos Funcionario' : 'Datos Alumno')} · ${puntoRed?.categoria_cable?.toUpperCase() || 'Cat6'}`
                 : camera
                 ? `MAC: ${camera.direccion_mac || 'No registrada'} · ${camera.ubicacion_especifica || 'Piso 2'} · IP ${camera.direccion_ip || 'No asignada'}`
                 : equipo
@@ -369,9 +497,28 @@ export const MaintenanceHistory: React.FC<MaintenanceHistoryProps> = ({
                       </div>
                     </div>
 
-                    <p className="text-slate-700 text-xs leading-relaxed font-sans pt-1">
-                      {item.descripcion}
-                    </p>
+                    {item.descripcion && item.descripcion.includes('[Dispositivos Afectados:') ? (
+                      <div className="space-y-1.5 pt-1">
+                        <div className="p-2 bg-blue-50/80 rounded border border-blue-200 text-[11px] text-blue-900 font-mono">
+                          <div className="font-bold flex items-center gap-1 text-blue-800 mb-0.5">
+                            <Server className="w-3 h-3 text-blue-600" />
+                            <span>Dispositivos Afectados en esta Intervención:</span>
+                          </div>
+                          <p className="text-blue-950 font-sans text-xs">
+                            {item.descripcion.split('\n\n')[0].replace('[Dispositivos Afectados: ', '').replace(']', '')}
+                          </p>
+                        </div>
+                        {item.descripcion.includes('\n\n') && (
+                          <p className="text-slate-700 text-xs leading-relaxed font-sans">
+                            {item.descripcion.split('\n\n').slice(1).join('\n\n')}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-slate-700 text-xs leading-relaxed font-sans pt-1">
+                        {item.descripcion}
+                      </p>
+                    )}
 
                     {item.repuestos_insumos && (
                       <div className="pt-2 border-t border-slate-100 flex items-center gap-2 flex-wrap">
@@ -418,8 +565,8 @@ export const MaintenanceHistory: React.FC<MaintenanceHistoryProps> = ({
                   <span className="text-slate-800">{rack?.custodia_llave || 'No registrada'}</span>
                 </div>
                 <div className="flex justify-between py-1 border-b border-slate-100">
-                  <span className="text-slate-500">Carga Máxima</span>
-                  <span className="text-slate-800">{rack?.carga_maxima_kg ? `${rack.carga_maxima_kg} kg` : '800 kg'}</span>
+                  <span className="text-slate-500">Última Inspección</span>
+                  <span className="text-slate-800">{rack?.ultima_inspeccion || 'Sin registro'}</span>
                 </div>
                 <div className="flex justify-between py-1">
                   <span className="text-slate-500">Responsable Técnico</span>
@@ -521,6 +668,86 @@ export const MaintenanceHistory: React.FC<MaintenanceHistoryProps> = ({
                 </select>
               </div>
 
+              {entityType === 'rack' && (
+                <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-[11px] font-bold text-slate-800 flex items-center gap-1.5">
+                      <Server className="w-3.5 h-3.5 text-blue-600" />
+                      <span>Dispositivos Afectados ({selectedAffectedDeviceIds.length} seleccionados)</span>
+                    </label>
+                    {rackDevices.length > 0 && (
+                      <div className="flex items-center gap-2 text-[10px]">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedAffectedDeviceIds(rackDevices.map(d => d.id))}
+                          className="text-blue-600 hover:underline cursor-pointer"
+                        >
+                          Todos ({rackDevices.length})
+                        </button>
+                        <span className="text-slate-300">•</span>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedAffectedDeviceIds([])}
+                          className="text-slate-500 hover:underline cursor-pointer"
+                        >
+                          Ninguno
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <p className="text-[10px] text-slate-500 font-sans">
+                    Marca los equipos o cámaras intervenidos en este rack para registrar su historial individual y reporte de fallas.
+                  </p>
+
+                  {rackDevices.length === 0 ? (
+                    <p className="text-[11px] text-slate-400 italic py-1">
+                      No hay equipos ni cámaras vinculados actualmente a este bastidor.
+                    </p>
+                  ) : (
+                    <div className="max-h-36 overflow-y-auto space-y-1 pr-1 border border-slate-200 rounded bg-white p-2 divide-y divide-slate-100">
+                      {rackDevices.map(dev => {
+                        const isSelected = selectedAffectedDeviceIds.includes(dev.id);
+                        return (
+                          <label
+                            key={dev.id}
+                            className={`flex items-center justify-between p-1.5 rounded cursor-pointer transition-colors ${
+                              isSelected ? 'bg-blue-50/70 text-blue-900 font-semibold' : 'hover:bg-slate-50 text-slate-700'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedAffectedDeviceIds(prev => [...prev, dev.id]);
+                                  } else {
+                                    setSelectedAffectedDeviceIds(prev => prev.filter(id => id !== dev.id));
+                                  }
+                                }}
+                                className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 h-3.5 w-3.5 shrink-0"
+                              />
+                              <div className="truncate text-xs">
+                                <span className="font-bold font-mono">{dev.codigo}</span>
+                                <span className="text-slate-500 text-[10px] ml-1.5 font-normal">
+                                  {dev.tipoLabel} · {dev.marca} {dev.modelo}
+                                </span>
+                              </div>
+                            </div>
+                            {dev.posicion && (
+                              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 shrink-0 ml-2">
+                                {dev.posicion}
+                              </span>
+                            )}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] text-slate-600 mb-1">Fecha y Hora *</label>
@@ -562,8 +789,19 @@ export const MaintenanceHistory: React.FC<MaintenanceHistoryProps> = ({
                   type="text"
                   value={modalFormData.repuestos_insumos}
                   onChange={(e) => setModalFormData({ ...modalFormData, repuestos_insumos: e.target.value })}
-                  placeholder="ej. Kit de limpieza óptica, Paño antiestático, Plug RJ45"
+                  placeholder="ej. Kit de limpieza óptica, Paño antiestático, Patch cord cat6A"
                   className="w-full px-3 py-1.5 border border-slate-300 rounded focus:ring-1 focus:ring-blue-600"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-slate-600 mb-1">Ticket de Referencia / OT (Opcional)</label>
+                <input
+                  type="text"
+                  value={modalFormData.ticket_referencia}
+                  onChange={(e) => setModalFormData({ ...modalFormData, ticket_referencia: e.target.value })}
+                  placeholder="ej. OT-2026-8941 o TCK-9912"
+                  className="w-full px-3 py-1.5 border border-slate-300 rounded focus:ring-1 focus:ring-blue-600 font-mono text-xs"
                 />
               </div>
 

@@ -604,8 +604,16 @@ export const NodeFormModal: React.FC<NodeFormModalProps> = ({
                     min="1"
                     max="60"
                     required
-                    value={formData.altura_u || 42}
-                    onChange={(e) => setFormData({ ...formData, altura_u: parseInt(e.target.value) || 42 })}
+                    value={formData.altura_u ?? ''}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === '') setFormData({ ...formData, altura_u: '' as any });
+                      else {
+                        const n = parseInt(val, 10);
+                        if (!isNaN(n)) setFormData({ ...formData, altura_u: n });
+                      }
+                    }}
+                    placeholder="42"
                     className="w-full px-3 py-1.5 border border-slate-300 rounded font-mono focus:outline-none focus:ring-1 focus:ring-blue-600 focus:border-blue-600"
                   />
                 </div>

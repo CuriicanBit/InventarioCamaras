@@ -14,13 +14,15 @@ import {
   AlertCircle,
   HelpCircle,
   Link2Off,
-  Filter
+  Filter,
+  Layers,
+  Palette
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Marca, Modelo, Proveedor, TipoEquipo } from '../types/database';
+import { Marca, Modelo, Proveedor, TipoEquipo, Vlan } from '../types/database';
 
 export const CatalogsView: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'marcas' | 'modelos' | 'proveedores'>('marcas');
+  const [activeTab, setActiveTab] = useState<'marcas' | 'modelos' | 'proveedores' | 'vlans'>('marcas');
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -28,6 +30,7 @@ export const CatalogsView: React.FC = () => {
   const [marcas, setMarcas] = useState<Marca[]>([]);
   const [modelos, setModelos] = useState<Modelo[]>([]);
   const [proveedores, setProveedores] = useState<Proveedor[]>([]);
+  const [vlans, setVlans] = useState<Vlan[]>([]);
 
   // Usage counts map: itemId -> { modelos?: number, equipos?: number, camaras?: number, total: number, details?: string }
   const [usageStats, setUsageStats] = useState<Record<string, { total: number; text: string }>>({});
@@ -36,11 +39,12 @@ export const CatalogsView: React.FC = () => {
   const [marcaModal, setMarcaModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; item?: Marca } | null>(null);
   const [modeloModal, setModeloModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; item?: Modelo } | null>(null);
   const [proveedorModal, setProveedorModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; item?: Proveedor } | null>(null);
+  const [vlanModal, setVlanModal] = useState<{ isOpen: boolean; mode: 'create' | 'edit'; item?: Vlan } | null>(null);
 
   // Delete modal state
   const [deleteDialog, setDeleteDialog] = useState<{
     isOpen: boolean;
-    type: 'marca' | 'modelo' | 'proveedor';
+    type: 'marca' | 'modelo' | 'proveedor' | 'vlan';
     id: string;
     nombre: string;
     usageCount: number;
@@ -53,6 +57,18 @@ export const CatalogsView: React.FC = () => {
 
   // Form states for modals
   const [brandFormName, setBrandFormName] = useState('');
+  
+  const [vlanForm, setVlanForm] = useState<{
+    numero: string;
+    nombre: string;
+    color: string;
+    descripcion: string;
+  }>({
+    numero: '',
+    nombre: '',
+    color: '#2563EB',
+    descripcion: '',
+  });
   
   const [modelForm, setModelForm] = useState<{
     marca_id: string;
@@ -100,23 +116,30 @@ export const CatalogsView: React.FC = () => {
         { data: provData },
         { data: allEquipos },
         { data: allCamaras },
+        { data: vlansData },
+        { data: allSwitchPorts },
       ] = await Promise.all([
         supabase.from('marcas').select('*').order('nombre'),
         supabase.from('modelos').select('*, marca:marcas(*)').order('nombre'),
         supabase.from('proveedores').select('*').order('nombre'),
         supabase.from('equipos').select('id, marca_id, modelo_id, proveedor_compra_id, proveedor_instalacion_id'),
         supabase.from('camaras').select('id, marca_id, modelo_id, proveedor_compra_id, proveedor_instalacion_id, codigo'),
+        supabase.from('vlans').select('*').order('numero'),
+        supabase.from('puertos_switch').select('id, vlan, vlan_id, numero_puerto, switch_id'),
       ]);
 
       const loadedMarcas = marcasData || [];
       const loadedModelos = modelosData || [];
       const loadedProvs = provData || [];
+      const loadedVlans = vlansData || [];
       const eqs = allEquipos || [];
       const cams = allCamaras || [];
+      const swPorts = allSwitchPorts || [];
 
       setMarcas(loadedMarcas);
       setModelos(loadedModelos);
       setProveedores(loadedProvs);
+      setVlans(loadedVlans);
 
       // Compute usage map
       const stats: Record<string, { total: number; text: string }> = {};
@@ -173,6 +196,15 @@ export const CatalogsView: React.FC = () => {
         stats[`prov-${p.id}`] = {
           total,
           text: parts.length > 0 ? parts.join(', ') : 'Sin registros asociados',
+        };
+      });
+
+      // 4. VLANs usage (puertos_switch)
+      loadedVlans.forEach(v => {
+        const portCount = swPorts.filter(sp => sp.vlan_id === v.id || sp.vlan === v.numero).length;
+        stats[`vlan-${v.id}`] = {
+          total: portCount,
+          text: portCount > 0 ? `${portCount} ${portCount === 1 ? 'puerto de switch' : 'puertos de switch'}` : 'Sin puertos asignados',
         };
       });
 
@@ -364,10 +396,74 @@ export const CatalogsView: React.FC = () => {
   };
 
   // ==========================================
+  // VLAN ACTIONS
+  // ==========================================
+  const handleOpenVlanModal = (mode: 'create' | 'edit', item?: Vlan) => {
+    if (mode === 'edit' && item) {
+      setVlanForm({
+        numero: String(item.numero),
+        nombre: item.nombre,
+        color: item.color || '#2563EB',
+        descripcion: item.descripcion || '',
+      });
+    } else {
+      setVlanForm({
+        numero: '',
+        nombre: '',
+        color: '#2563EB',
+        descripcion: '',
+      });
+    }
+    setVlanModal({ isOpen: true, mode, item });
+  };
+
+  const handleSaveVlan = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const num = parseInt(vlanForm.numero.trim());
+    const cleanNombre = vlanForm.nombre.trim();
+    if (isNaN(num) || num < 1 || num > 4094) {
+      triggerToast('El número de VLAN debe ser un entero entre 1 y 4094', true);
+      return;
+    }
+    if (!cleanNombre) {
+      triggerToast('Debe ingresar un nombre para la VLAN', true);
+      return;
+    }
+
+    try {
+      setActionLoading(true);
+      const payload = {
+        numero: num,
+        nombre: cleanNombre,
+        color: vlanForm.color || '#2563EB',
+        descripcion: vlanForm.descripcion.trim() || null,
+      };
+
+      if (vlanModal?.mode === 'create') {
+        const { error } = await supabase.from('vlans').insert([payload]);
+        if (error) throw error;
+        triggerToast(`VLAN ${num} ("${cleanNombre}") creada correctamente.`);
+      } else if (vlanModal?.mode === 'edit' && vlanModal.item) {
+        const { error } = await supabase.from('vlans').update(payload).eq('id', vlanModal.item.id);
+        if (error) throw error;
+        // Also update any puertos_switch that had the old vlan number if needed
+        triggerToast(`VLAN ${num} ("${cleanNombre}") actualizada.`);
+      }
+      setVlanModal(null);
+      await loadCatalogs();
+    } catch (err: any) {
+      console.error('Error saving VLAN:', err);
+      triggerToast(err.message || 'Error al guardar la VLAN', true);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // ==========================================
   // DELETE & UNLINK SAFETY FLOW
   // ==========================================
-  const handleRequestDelete = (type: 'marca' | 'modelo' | 'proveedor', id: string, nombre: string) => {
-    const key = `${type === 'marca' ? 'marca' : type === 'modelo' ? 'modelo' : 'prov'}-${id}`;
+  const handleRequestDelete = (type: 'marca' | 'modelo' | 'proveedor' | 'vlan', id: string, nombre: string) => {
+    const key = `${type === 'marca' ? 'marca' : type === 'modelo' ? 'modelo' : type === 'proveedor' ? 'prov' : 'vlan'}-${id}`;
     const stat = usageStats[key] || { total: 0, text: 'Sin uso' };
 
     setDeleteDialog({
@@ -385,6 +481,11 @@ export const CatalogsView: React.FC = () => {
     try {
       setActionLoading(true);
       const { type, id, nombre, usageCount } = deleteDialog;
+
+      if (usageCount > 0 && type === 'vlan') {
+        triggerToast('No se puede eliminar una VLAN en uso. Reasigne primero los puertos que la utilizan.', true);
+        return;
+      }
 
       if (usageCount > 0 && !forceUnlink) {
         triggerToast('No se puede eliminar directamente un ítem en uso.', true);
@@ -412,7 +513,7 @@ export const CatalogsView: React.FC = () => {
       }
 
       // Now delete the record
-      const tableName = type === 'marca' ? 'marcas' : type === 'modelo' ? 'modelos' : 'proveedores';
+      const tableName = type === 'marca' ? 'marcas' : type === 'modelo' ? 'modelos' : type === 'proveedor' ? 'proveedores' : 'vlans';
       const { error } = await supabase.from(tableName).delete().eq('id', id);
       if (error) throw error;
 
@@ -448,12 +549,20 @@ export const CatalogsView: React.FC = () => {
     return matchName || matchContact || matchRubro;
   });
 
+  const filteredVlans = vlans.filter(v => {
+    if (!q) return true;
+    const matchNum = String(v.numero).includes(q);
+    const matchName = v.nombre.toLowerCase().includes(q);
+    const matchDesc = (v.descripcion || '').toLowerCase().includes(q);
+    return matchNum || matchName || matchDesc;
+  });
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
       {/* Top Banner */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between text-[11px] font-mono border-b border-slate-200 pb-2 text-slate-500 gap-2">
         <div className="flex items-center gap-2">
-          <span>Configuración &gt; <strong className="text-slate-800">Catálogos de Hardware y Proveedores</strong></span>
+          <span>Configuración &gt; <strong className="text-slate-800">Catálogos de Hardware, Red y Proveedores</strong></span>
         </div>
         <div className="flex items-center gap-3">
           <span className="text-slate-700 font-semibold flex items-center gap-1">
@@ -463,7 +572,7 @@ export const CatalogsView: React.FC = () => {
           <span>•</span>
           <button 
             onClick={loadCatalogs}
-            className="hover:text-blue-600 flex items-center gap-1"
+            className="hover:text-blue-600 flex items-center gap-1 cursor-pointer"
           >
             <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
             <span>Actualizar</span>
@@ -484,7 +593,7 @@ export const CatalogsView: React.FC = () => {
             <span>Catálogos Maestros</span>
           </h1>
           <p className="text-xs text-slate-600 mt-1 max-w-3xl">
-            Administre las marcas comerciales, modelos certificados y empresas proveedoras del sistema. Las modificaciones se reflejan en tiempo real en los montajes de rack y fichas de cámaras.
+            Administre marcas comerciales, modelos certificados, empresas proveedoras y segmentos de red VLAN. Las modificaciones se reflejan en tiempo real en los montajes de rack, puertos y registros.
           </p>
         </div>
 
@@ -493,7 +602,7 @@ export const CatalogsView: React.FC = () => {
           {activeTab === 'marcas' && (
             <button
               onClick={() => handleOpenMarcaModal('create')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-semibold font-mono shadow-xs transition-colors"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-semibold font-mono shadow-xs transition-colors cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>+ Nueva Marca</span>
@@ -502,7 +611,7 @@ export const CatalogsView: React.FC = () => {
           {activeTab === 'modelos' && (
             <button
               onClick={() => handleOpenModeloModal('create')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-semibold font-mono shadow-xs transition-colors"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-semibold font-mono shadow-xs transition-colors cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>+ Nuevo Modelo</span>
@@ -511,10 +620,19 @@ export const CatalogsView: React.FC = () => {
           {activeTab === 'proveedores' && (
             <button
               onClick={() => handleOpenProveedorModal('create')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-semibold font-mono shadow-xs transition-colors"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-semibold font-mono shadow-xs transition-colors cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>+ Nuevo Proveedor</span>
+            </button>
+          )}
+          {activeTab === 'vlans' && (
+            <button
+              onClick={() => handleOpenVlanModal('create')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-xs font-semibold font-mono shadow-xs transition-colors cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>+ Nueva VLAN</span>
             </button>
           )}
         </div>
@@ -527,7 +645,7 @@ export const CatalogsView: React.FC = () => {
             <Check className="w-4 h-4 text-emerald-600 shrink-0" />
             <span>{successToast}</span>
           </div>
-          <button onClick={() => setSuccessToast(null)} className="text-emerald-600 hover:text-emerald-800">
+          <button onClick={() => setSuccessToast(null)} className="text-emerald-600 hover:text-emerald-800 cursor-pointer">
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -539,7 +657,7 @@ export const CatalogsView: React.FC = () => {
             <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
             <span>{errorToast}</span>
           </div>
-          <button onClick={() => setErrorToast(null)} className="text-rose-600 hover:text-rose-800">
+          <button onClick={() => setErrorToast(null)} className="text-rose-600 hover:text-rose-800 cursor-pointer">
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -547,10 +665,10 @@ export const CatalogsView: React.FC = () => {
 
       {/* Tabs and Search Bar */}
       <div className="bg-white border border-slate-200 rounded-lg p-3 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs font-mono">
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 flex-wrap">
           <button
             onClick={() => { setActiveTab('marcas'); setSearchQuery(''); }}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded transition-all ${
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded transition-all cursor-pointer ${
               activeTab === 'marcas'
                 ? 'bg-slate-900 text-white font-semibold shadow-xs'
                 : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
@@ -561,7 +679,7 @@ export const CatalogsView: React.FC = () => {
           </button>
           <button
             onClick={() => { setActiveTab('modelos'); setSearchQuery(''); }}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded transition-all ${
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded transition-all cursor-pointer ${
               activeTab === 'modelos'
                 ? 'bg-blue-600 text-white font-semibold shadow-xs'
                 : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
@@ -572,7 +690,7 @@ export const CatalogsView: React.FC = () => {
           </button>
           <button
             onClick={() => { setActiveTab('proveedores'); setSearchQuery(''); }}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded transition-all ${
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded transition-all cursor-pointer ${
               activeTab === 'proveedores'
                 ? 'bg-purple-600 text-white font-semibold shadow-xs'
                 : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
@@ -580,6 +698,17 @@ export const CatalogsView: React.FC = () => {
           >
             <Building className="w-3.5 h-3.5" />
             <span>Proveedores ({proveedores.length})</span>
+          </button>
+          <button
+            onClick={() => { setActiveTab('vlans'); setSearchQuery(''); }}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded transition-all cursor-pointer ${
+              activeTab === 'vlans'
+                ? 'bg-indigo-600 text-white font-semibold shadow-xs'
+                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+            }`}
+          >
+            <Layers className="w-3.5 h-3.5" />
+            <span>VLANs ({vlans.length})</span>
           </button>
         </div>
 
@@ -843,6 +972,107 @@ export const CatalogsView: React.FC = () => {
                                   onClick={() => handleRequestDelete('proveedor', p.id, p.nombre)}
                                   className="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded"
                                   title={isTemp ? 'Eliminar registro temporal' : 'Eliminar proveedor'}
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* TAB: VLANS */}
+            {activeTab === 'vlans' && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs font-mono">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-[10px] text-slate-500 uppercase tracking-wider">
+                    <tr>
+                      <th className="py-3 px-4 w-32">ID VLAN</th>
+                      <th className="py-3 px-4">Nombre de Red</th>
+                      <th className="py-3 px-4 w-36">Color Distintivo</th>
+                      <th className="py-3 px-4">Descripción</th>
+                      <th className="py-3 px-4 w-48">Uso en Puertos</th>
+                      <th className="py-3 px-4 text-right w-24">Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredVlans.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="py-8 text-center text-slate-400">
+                          No se encontraron VLANs registradas.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredVlans.map(v => {
+                        const stat = usageStats[`vlan-${v.id}`] || { total: 0, text: 'Sin uso' };
+                        const isInUse = stat.total > 0;
+
+                        return (
+                          <tr key={v.id} className="hover:bg-slate-50/80 transition-colors">
+                            <td className="py-3 px-4 font-bold whitespace-nowrap">
+                              <span 
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-bold border"
+                                style={{
+                                  backgroundColor: `${v.color}15`,
+                                  borderColor: `${v.color}50`,
+                                  color: v.color || '#2563EB',
+                                }}
+                              >
+                                <span 
+                                  className="w-2.5 h-2.5 rounded-full shrink-0 shadow-2xs" 
+                                  style={{ backgroundColor: v.color || '#2563EB' }}
+                                />
+                                <span>VLAN {v.numero}</span>
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 font-bold text-slate-900">
+                              {v.nombre}
+                            </td>
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              <div className="flex items-center gap-2">
+                                <span 
+                                  className="w-4 h-4 rounded-md border border-black/20 shadow-2xs shrink-0" 
+                                  style={{ backgroundColor: v.color }}
+                                />
+                                <span className="text-[11px] text-slate-500 font-mono uppercase">{v.color}</span>
+                              </div>
+                            </td>
+                            <td className="py-3 px-4 text-slate-600 text-[11px]">
+                              {v.descripcion || <span className="text-slate-300 italic">Sin descripción</span>}
+                            </td>
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              <span className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded border ${
+                                isInUse
+                                  ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                                  : 'bg-slate-50 text-slate-500 border-slate-200'
+                              }`}>
+                                {stat.text}
+                              </span>
+                            </td>
+                            <td className="py-3 px-4 text-right whitespace-nowrap">
+                              <div className="flex items-center justify-end gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenVlanModal('edit', v)}
+                                  className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-slate-100 rounded cursor-pointer"
+                                  title="Editar VLAN"
+                                >
+                                  <Edit className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRequestDelete('vlan', v.id, `VLAN ${v.numero} (${v.nombre})`)}
+                                  className={`p-1.5 rounded cursor-pointer transition-colors ${
+                                    isInUse 
+                                      ? 'text-slate-300 hover:text-rose-600 hover:bg-rose-50' 
+                                      : 'text-slate-500 hover:text-rose-600 hover:bg-rose-50'
+                                  }`}
+                                  title={isInUse ? 'VLAN en uso (bloqueada para eliminar)' : 'Eliminar VLAN'}
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
@@ -1208,6 +1438,125 @@ export const CatalogsView: React.FC = () => {
       )}
 
       {/* ========================================== */}
+      {/* MODAL: VLAN CREATE / EDIT */}
+      {/* ========================================== */}
+      {vlanModal?.isOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg border border-slate-200 shadow-xl max-w-md w-full overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="p-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between font-mono">
+              <h3 className="text-xs font-bold text-slate-900 flex items-center gap-2">
+                <Layers className="w-4 h-4 text-indigo-600" />
+                <span>{vlanModal.mode === 'create' ? 'Crear Nueva VLAN' : 'Editar VLAN'}</span>
+              </h3>
+              <button 
+                type="button" 
+                onClick={() => setVlanModal(null)}
+                className="text-slate-400 hover:text-slate-700 text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveVlan} className="p-5 space-y-4 text-xs font-mono">
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] text-slate-600 mb-1">ID VLAN *</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={4094}
+                    required
+                    autoFocus
+                    value={vlanForm.numero}
+                    onChange={(e) => setVlanForm({ ...vlanForm, numero: e.target.value })}
+                    placeholder="10"
+                    className="w-full px-3 py-1.5 border border-slate-300 rounded font-bold text-slate-900 text-xs bg-white focus:ring-1 focus:ring-indigo-600"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-[11px] text-slate-600 mb-1">Nombre de Red *</label>
+                  <input
+                    type="text"
+                    required
+                    value={vlanForm.nombre}
+                    onChange={(e) => setVlanForm({ ...vlanForm, nombre: e.target.value })}
+                    placeholder="ej. CCTV - Cámaras de Seguridad"
+                    className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs bg-white focus:ring-1 focus:ring-indigo-600"
+                  />
+                </div>
+              </div>
+
+              {/* Color Selector */}
+              <div>
+                <label className="block text-[11px] text-slate-600 mb-1.5 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <Palette className="w-3.5 h-3.5 text-slate-500" />
+                    <span>Color Identificador</span>
+                  </span>
+                  <span className="text-[10px] text-slate-400 uppercase font-mono">{vlanForm.color}</span>
+                </label>
+                <div className="flex items-center gap-2 flex-wrap p-2 border border-slate-200 rounded-lg bg-slate-50">
+                  {['#2563EB', '#0891B2', '#059669', '#7C3AED', '#D97706', '#DC2626', '#4F46E5', '#DB2777', '#475569'].map(c => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => setVlanForm({ ...vlanForm, color: c })}
+                      className={`w-6 h-6 rounded-full border transition-all cursor-pointer ${
+                        vlanForm.color.toLowerCase() === c.toLowerCase()
+                          ? 'scale-125 border-slate-900 ring-2 ring-indigo-500/50 shadow-xs'
+                          : 'border-black/20 hover:scale-110'
+                      }`}
+                      style={{ backgroundColor: c }}
+                      title={c}
+                    />
+                  ))}
+                  <div className="h-5 w-px bg-slate-300 mx-1" />
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="color"
+                      value={vlanForm.color}
+                      onChange={(e) => setVlanForm({ ...vlanForm, color: e.target.value })}
+                      title="Seleccionar color personalizado"
+                      className="w-7 h-7 p-0 border border-slate-300 rounded cursor-pointer"
+                    />
+                    <span className="text-[10px] text-slate-500">Personalizado</span>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-slate-600 mb-1">Descripción / Uso previsto (Opcional)</label>
+                <input
+                  type="text"
+                  value={vlanForm.descripcion}
+                  onChange={(e) => setVlanForm({ ...vlanForm, descripcion: e.target.value })}
+                  placeholder="ej. Segmento exclusivo para videovigilancia y grabadores"
+                  className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs bg-white focus:ring-1 focus:ring-indigo-600"
+                />
+              </div>
+
+              <div className="pt-2 flex justify-end gap-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setVlanModal(null)}
+                  className="px-3 py-1.5 text-slate-600 hover:bg-slate-100 rounded cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={actionLoading || !vlanForm.numero.trim() || !vlanForm.nombre.trim()}
+                  className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-semibold disabled:opacity-50 cursor-pointer shadow-xs"
+                >
+                  {actionLoading ? 'Guardando...' : (vlanModal.mode === 'create' ? 'Crear VLAN' : 'Guardar Cambios')}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================== */}
       {/* MODAL: DELETE & SAFETY VALIDATION */}
       {/* ========================================== */}
       {deleteDialog?.isOpen && (
@@ -1221,7 +1570,7 @@ export const CatalogsView: React.FC = () => {
               <button 
                 type="button" 
                 onClick={() => setDeleteDialog(null)}
-                className="text-slate-400 hover:text-slate-700 text-sm font-bold"
+                className="text-slate-400 hover:text-slate-700 text-sm font-bold cursor-pointer"
               >
                 ✕
               </button>
@@ -1229,25 +1578,40 @@ export const CatalogsView: React.FC = () => {
 
             <div className="p-5 space-y-4 text-xs font-mono">
               <div className="text-slate-700">
-                ¿Está seguro de eliminar {deleteDialog.type} <strong className="text-slate-900">"{deleteDialog.nombre}"</strong>?
+                ¿Está seguro de eliminar {deleteDialog.type === 'vlan' ? 'la' : deleteDialog.type} <strong className="text-slate-900">"{deleteDialog.nombre}"</strong>?
               </div>
 
               {deleteDialog.usageCount > 0 ? (
-                <div className="p-3 bg-amber-50 border border-amber-200 rounded text-amber-900 space-y-2">
-                  <div className="flex items-center gap-1.5 font-bold text-amber-800">
-                    <AlertCircle className="w-4 h-4 shrink-0 text-amber-600" />
-                    <span>Elemento en Uso ({deleteDialog.usageCount} referencias)</span>
+                deleteDialog.type === 'vlan' ? (
+                  <div className="p-3.5 bg-rose-50 border border-rose-300 rounded text-rose-900 space-y-2">
+                    <div className="flex items-center gap-1.5 font-bold text-rose-800">
+                      <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                      <span>Acción Bloqueada: VLAN en Uso ({deleteDialog.usageCount} puertos)</span>
+                    </div>
+                    <p className="text-[11px] text-rose-800 leading-relaxed font-sans">
+                      No es posible eliminar esta VLAN porque se encuentra asignada actualmente a <strong>{deleteDialog.usageDetails}</strong>.
+                    </p>
+                    <p className="text-[11px] text-slate-600 font-sans pt-1 border-t border-rose-200">
+                      Para poder eliminarla de forma segura, primero ingrese a la sección <em>Puertos y VLANs</em> de los switches correspondientes y reasigne esos puertos a otra VLAN o déjelos sin VLAN asignada.
+                    </p>
                   </div>
-                  <p className="text-[11px] text-amber-700 leading-relaxed">
-                    Este ítem está actualmente asignado a: <strong>{deleteDialog.usageDetails}</strong>.
-                  </p>
-                  <p className="text-[11px] text-slate-600 pt-1 border-t border-amber-200/60">
-                    Para eliminarlo definitivamente, puede desvincular estas referencias (estableciéndolas en <em>null / Sin Asignar</em>) y proceder con el borrado.
-                  </p>
-                </div>
+                ) : (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded text-amber-900 space-y-2">
+                    <div className="flex items-center gap-1.5 font-bold text-amber-800">
+                      <AlertCircle className="w-4 h-4 shrink-0 text-amber-600" />
+                      <span>Elemento en Uso ({deleteDialog.usageCount} referencias)</span>
+                    </div>
+                    <p className="text-[11px] text-amber-700 leading-relaxed font-sans">
+                      Este ítem está actualmente asignado a: <strong>{deleteDialog.usageDetails}</strong>.
+                    </p>
+                    <p className="text-[11px] text-slate-600 font-sans pt-1 border-t border-amber-200/60">
+                      Para eliminarlo definitivamente, puede desvincular estas referencias (estableciéndolas en <em>null / Sin Asignar</em>) y proceder con el borrado.
+                    </p>
+                  </div>
+                )
               ) : (
                 <p className="text-slate-500 text-[11px]">
-                  Este registro no tiene elementos asociados activos y se eliminará permanentemente.
+                  Este registro no tiene elementos asociados activos y se eliminará permanentemente del catálogo.
                 </p>
               )}
 
@@ -1256,27 +1620,39 @@ export const CatalogsView: React.FC = () => {
                   type="button"
                   disabled={actionLoading}
                   onClick={() => setDeleteDialog(null)}
-                  className="px-3.5 py-1.5 text-slate-600 hover:bg-slate-100 rounded"
+                  className="px-3.5 py-1.5 text-slate-600 hover:bg-slate-100 rounded cursor-pointer"
                 >
-                  Cancelar
+                  {deleteDialog.type === 'vlan' && deleteDialog.usageCount > 0 ? 'Entendido / Cerrar' : 'Cancelar'}
                 </button>
 
                 {deleteDialog.usageCount > 0 ? (
-                  <button
-                    type="button"
-                    disabled={actionLoading}
-                    onClick={() => handleExecuteDelete(true)}
-                    className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded font-semibold transition-colors"
-                  >
-                    <Link2Off className="w-3.5 h-3.5" />
-                    <span>{actionLoading ? 'Procesando...' : 'Desvincular y Eliminar'}</span>
-                  </button>
+                  deleteDialog.type === 'vlan' ? (
+                    <button
+                      type="button"
+                      disabled
+                      className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-slate-200 text-slate-400 rounded font-semibold cursor-not-allowed text-xs"
+                      title="Bloqueado por estar en uso en puertos de switch"
+                    >
+                      <AlertTriangle className="w-3.5 h-3.5" />
+                      <span>Bloqueado (En Uso)</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={actionLoading}
+                      onClick={() => handleExecuteDelete(true)}
+                      className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded font-semibold transition-colors cursor-pointer"
+                    >
+                      <Link2Off className="w-3.5 h-3.5" />
+                      <span>{actionLoading ? 'Procesando...' : 'Desvincular y Eliminar'}</span>
+                    </button>
+                  )
                 ) : (
                   <button
                     type="button"
                     disabled={actionLoading}
                     onClick={() => handleExecuteDelete(false)}
-                    className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded font-semibold transition-colors"
+                    className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded font-semibold transition-colors cursor-pointer"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                     <span>{actionLoading ? 'Eliminando...' : 'Eliminar Registro'}</span>

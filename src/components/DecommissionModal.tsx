@@ -6,7 +6,7 @@ import { EstadoCicloVida } from '../types/database';
 interface DecommissionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  itemType: 'camara' | 'equipo';
+  itemType: 'camara' | 'equipo' | 'punto_red';
   itemId: string;
   itemCode: string;
   onSuccess: (nuevoEstado: EstadoCicloVida) => void;
@@ -57,6 +57,24 @@ export const DecommissionModal: React.FC<DecommissionModalProps> = ({
           .eq('id', itemId);
 
         if (camErr) throw camErr;
+      } else if (itemType === 'punto_red') {
+        const payload: any = {
+          estado_ciclo_vida: nuevoEstado,
+        };
+        if (nuevoEstado !== 'instalado') {
+          payload.rack_id = null;
+          payload.patch_panel_id = null;
+          payload.puerto_patch = null;
+          payload.switch_id = null;
+          payload.puerto_switch_id = null;
+        }
+
+        const { error: prErr } = await supabase
+          .from('puntos_red')
+          .update(payload)
+          .eq('id', itemId);
+
+        if (prErr) throw prErr;
       } else {
         const payload: any = {
           estado_ciclo_vida: nuevoEstado,

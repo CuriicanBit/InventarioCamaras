@@ -2,7 +2,6 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   BarChart3, 
   Download, 
-  Printer, 
   RefreshCw, 
   Search, 
   AlertTriangle, 
@@ -20,12 +19,17 @@ import {
   Layers, 
   Filter, 
   ArrowRight,
-  Sparkles,
-  Info
+  Info,
+  MapPin,
+  FileText,
+  Wrench
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Equipo, Camara, Rack, Piso, Edificio, Campus, Sede } from '../types/database';
 import { calculateEquipmentOccupancy, EquipmentOccupancyInfo, OccupancyStatus } from '../utils/occupancyAlerts';
+import { exportReportToExcel, exportReportToPdf, ReportFilterItem, ReportKpiSummaryItem } from '../utils/reportExport';
+import { LocationInventoryReport } from './LocationInventoryReport';
+import { DeviceInterventionsReport } from './DeviceInterventionsReport';
 
 interface ReportsViewProps {
   onSelectRack?: (rack: Rack) => void;
@@ -38,13 +42,14 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   onNavigateToPorts,
   onSelectCamera,
 }) => {
-  const [activeTab, setActiveTab] = useState<'capacidad' | 'conectividad' | 'futuros'>('capacidad');
+  const [activeTab, setActiveTab] = useState<'ocupacion' | 'ubicacion' | 'intervenciones'>('ocupacion');
   const [loading, setLoading] = useState(true);
   const [equipos, setEquipos] = useState<Equipo[]>([]);
   const [camaras, setCamaras] = useState<Camara[]>([]);
   const [racks, setRacks] = useState<Rack[]>([]);
   const [pisos, setPisos] = useState<Piso[]>([]);
   const [edificios, setEdificios] = useState<Edificio[]>([]);
+  const [campusList, setCampusList] = useState<Campus[]>([]);
   const [sedes, setSedes] = useState<Sede[]>([]);
   const [nvrUplinks, setNvrUplinks] = useState<Record<string, any>>({});
 
@@ -76,21 +81,22 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         { data: rkData },
         { data: psData },
         { data: edData },
+        { data: cpData },
         { data: sdData },
       ] = await Promise.all([
         supabase
           .from('equipos')
           .select('*, marca_rel:marcas(*), modelo_rel:modelos(*), rack:racks(*)')
-          .or('estado_ciclo_vida.is.null,estado_ciclo_vida.eq.instalado')
           .order('codigo'),
         supabase
           .from('camaras')
           .select('*, patch_panel:equipos!patch_panel_id(*), switch:equipos!switch_id(*), nvr:equipos!nvr_id(*)')
-          .or('estado_ciclo_vida.is.null,estado_ciclo_vida.eq.instalado'),
+          .order('codigo'),
         supabase.from('racks').select('*, piso:pisos(*)').order('codigo'),
-        supabase.from('pisos').select('*'),
-        supabase.from('edificios').select('*'),
-        supabase.from('sedes').select('*'),
+        supabase.from('pisos').select('*').order('nombre'),
+        supabase.from('edificios').select('*').order('nombre'),
+        supabase.from('campus').select('*').order('nombre'),
+        supabase.from('sedes').select('*').order('nombre'),
       ]);
 
       setEquipos(eqData || []);
@@ -98,6 +104,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
       setRacks(rkData || []);
       setPisos(psData || []);
       setEdificios(edData || []);
+      setCampusList(cpData || []);
       setSedes(sdData || []);
     } catch (err) {
       console.error('Error loading reports data:', err);
@@ -118,11 +125,15 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   // Compute occupancy for switches, NVRs, and patch panels
   const occupancyList = useMemo(() => {
     const relevant = equipos.filter(
-      e => e.tipo === 'switch' || e.tipo === 'nvr' || e.tipo === 'patch_panel'
+      e => (!e.estado_ciclo_vida || e.estado_ciclo_vida === 'instalado') &&
+           (e.tipo === 'switch' || e.tipo === 'nvr' || e.tipo === 'patch_panel')
+    );
+    const activeCams = camaras.filter(
+      c => !c.estado_ciclo_vida || c.estado_ciclo_vida === 'instalado'
     );
 
     return relevant.map(eq => {
-      const occ = calculateEquipmentOccupancy(eq, camaras, nvrUplinks);
+      const occ = calculateEquipmentOccupancy(eq, activeCams, nvrUplinks);
       const rack = eq.rack_id ? racksMap.get(eq.rack_id) : undefined;
       const piso = rack?.piso_id ? pisosMap.get(rack.piso_id) : undefined;
       const edificio = piso?.edificio_id ? edificiosMap.get(piso.edificio_id) : undefined;
@@ -208,23 +219,23 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     };
   }, [occupancyList]);
 
-  // Export CSV
-  const handleExportCSV = () => {
+  // Export Ocupación to Excel using generic export engine
+  const handleExportExcelOccupancy = () => {
     const headers = [
-      'Codigo',
+      'Código',
       'Tipo Dispositivo',
       'Rack',
-      'Ubicacion Fisica',
+      'Ubicación Física',
       'Marca',
       'Modelo',
-      'Capacidad Total (Puertos/Canales)',
-      'Ocupados',
-      'Disponibles',
-      'Porcentaje Ocupacion',
+      'Capacidad Total',
+      'Puertos Ocupados',
+      'Puertos Disponibles',
+      'Porcentaje Ocupación',
       'Estado Alerta',
-      'Directriz / Accion Recomendada',
-      'Total Camaras Conectadas',
-      'Detalle Conexiones'
+      'Directriz / Recomendación',
+      'Cámaras Conectadas',
+      'Detalle de Conexiones',
     ];
 
     const rows = filteredList.map(item => {
@@ -233,35 +244,120 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         .join('; ');
 
       return [
-        `"${item.equipoCodigo}"`,
-        `"${item.tipo.toUpperCase()}"`,
-        `"${item.rack?.codigo || 'N/A'}"`,
-        `"${item.ubicacionStr}"`,
-        `"${item.marcaNombre}"`,
-        `"${item.modeloNombre}"`,
+        item.equipoCodigo,
+        item.tipo.toUpperCase(),
+        item.rack?.codigo || 'N/A',
+        item.ubicacionStr,
+        item.marcaNombre,
+        item.modeloNombre,
         item.totalCapacity,
         item.occupiedCount,
         item.availableCount,
-        `"${item.percentage}%"`,
-        `"${item.statusLabel}"`,
-        `"${item.recommendation}"`,
+        `${item.percentage}%`,
+        item.statusLabel,
+        item.recommendation,
         item.connectedCameras.length,
-        `"${connectionsDetail.replace(/"/g, '""')}"`
-      ].join(',');
+        connectionsDetail,
+      ];
     });
 
-    const csvContent = '\uFEFF' + [headers.join(','), ...rows].join('\r\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `Reporte_Capacidad_Ocupacion_CCTV_${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+    const activeFilters: ReportFilterItem[] = [];
+    if (filterStatus !== 'all') {
+      activeFilters.push({ label: 'Estado', value: filterStatus.toUpperCase() });
+    }
+    if (filterTipo !== 'all') {
+      activeFilters.push({ label: 'Tipo', value: filterTipo.toUpperCase() });
+    }
+    if (filterRackId !== 'all') {
+      const r = racksMap.get(filterRackId);
+      activeFilters.push({ label: 'Rack', value: r ? `Rack ${r.codigo}` : filterRackId });
+    }
+    if (search.trim()) {
+      activeFilters.push({ label: 'Búsqueda', value: `"${search.trim()}"` });
+    }
+
+    const summaryKpis: ReportKpiSummaryItem[] = [
+      { label: 'Total Equipos', value: kpis.totalDevices },
+      { label: 'Críticos (>=78%)', value: kpis.critCount },
+      { label: 'En Alerta (74-77%)', value: kpis.alertCount },
+      { label: 'Normal (<73%)', value: kpis.optCount },
+      { label: 'Ocupación Global', value: `${kpis.globalPct}%` },
+    ];
+
+    exportReportToExcel({
+      title: 'Reporte de Ocupación de Red (Norma 75%)',
+      subtitle: 'CCTV InfraRegistro · Control de Capacidad en Switches, NVRs y Patch Panels',
+      filename: `Reporte_Ocupacion_Red_${new Date().toISOString().slice(0, 10)}`,
+      headers,
+      rows,
+      appliedFilters: activeFilters,
+      summaryKpis,
+    });
   };
 
-  const handlePrint = () => {
-    window.print();
+  // Export Ocupación to PDF using generic export engine
+  const handleExportPdfOccupancy = () => {
+    const headers = [
+      'Código',
+      'Tipo',
+      'Rack',
+      'Ubicación Física',
+      'Marca / Modelo',
+      'Capacidad',
+      'Ocupados',
+      'Disp.',
+      'Ocupación',
+      'Estado Alerta',
+      'Directriz / Recomendación',
+    ];
+
+    const rows = filteredList.map(item => [
+      item.equipoCodigo,
+      item.tipo.toUpperCase(),
+      item.rack?.codigo || 'N/A',
+      item.ubicacionStr,
+      `${item.marcaNombre} ${item.modeloNombre}`,
+      item.totalCapacity,
+      item.occupiedCount,
+      item.availableCount,
+      `${item.percentage}%`,
+      item.statusLabel,
+      item.recommendation,
+    ]);
+
+    const activeFilters: ReportFilterItem[] = [];
+    if (filterStatus !== 'all') {
+      activeFilters.push({ label: 'Estado', value: filterStatus.toUpperCase() });
+    }
+    if (filterTipo !== 'all') {
+      activeFilters.push({ label: 'Tipo', value: filterTipo.toUpperCase() });
+    }
+    if (filterRackId !== 'all') {
+      const r = racksMap.get(filterRackId);
+      activeFilters.push({ label: 'Rack', value: r ? `Rack ${r.codigo}` : filterRackId });
+    }
+    if (search.trim()) {
+      activeFilters.push({ label: 'Búsqueda', value: `"${search.trim()}"` });
+    }
+
+    const summaryKpis: ReportKpiSummaryItem[] = [
+      { label: 'Total Equipos', value: kpis.totalDevices },
+      { label: 'Críticos (>=78%)', value: kpis.critCount },
+      { label: 'En Alerta (74-77%)', value: kpis.alertCount },
+      { label: 'Normal (<73%)', value: kpis.optCount },
+      { label: 'Ocupación Global', value: `${kpis.globalPct}%` },
+    ];
+
+    exportReportToPdf({
+      title: 'Reporte de Ocupación de Red (Norma 75%)',
+      subtitle: 'CCTV InfraRegistro · Capacidad de Puertos y Canales en Switches, NVRs y Patch Panels',
+      filename: `Reporte_Ocupacion_Red_${new Date().toISOString().slice(0, 10)}`,
+      headers,
+      rows,
+      appliedFilters: activeFilters,
+      summaryKpis,
+      orientation: 'landscape',
+    });
   };
 
   const getTipoIcon = (tipo: string) => {
@@ -288,13 +384,13 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
             </div>
             <div>
               <h1 className="text-xl font-bold font-mono text-slate-900 tracking-tight flex items-center gap-2">
-                <span>Módulo de Reportes & Capacidad</span>
+                <span>Reportes</span>
                 <span className="text-xs font-mono font-normal uppercase bg-slate-100 text-slate-600 px-2 py-0.5 rounded border border-slate-200">
-                  Estándar 75%
+                  Infraestructura CCTV
                 </span>
               </h1>
               <p className="text-xs text-slate-500 font-mono mt-0.5">
-                Control de Ocupación, Alertas de Sobrecapacidad y Directrices de Ampliación de Inventario
+                Centro de Auditoría, Ocupación de Red, Inventario por Ubicación y Exportación Técnica
               </p>
             </div>
           </div>
@@ -306,49 +402,55 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
             type="button"
             onClick={loadData}
             disabled={loading}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded transition-colors shadow-2xs"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded transition-colors shadow-2xs cursor-pointer"
             title="Refrescar datos de la base de datos"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-blue-600' : ''}`} />
             <span>Actualizar</span>
           </button>
 
-          <button
-            type="button"
-            onClick={handleExportCSV}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded transition-colors shadow-2xs"
-            title="Exportar reporte completo a formato CSV compatible con Excel"
-          >
-            <Download className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Exportar CSV / Excel</span>
-          </button>
+          {activeTab === 'ocupacion' && (
+            <>
+              <button
+                type="button"
+                onClick={handleExportExcelOccupancy}
+                disabled={filteredList.length === 0}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white rounded transition-colors shadow-2xs cursor-pointer disabled:opacity-50"
+                title="Exportar reporte de ocupación a Excel (.xlsx)"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Exportar a Excel</span>
+              </button>
 
-          <button
-            type="button"
-            onClick={handlePrint}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors shadow-xs"
-            title="Imprimir o exportar reporte a PDF"
-          >
-            <Printer className="w-3.5 h-3.5" />
-            <span>Imprimir / PDF</span>
-          </button>
+              <button
+                type="button"
+                onClick={handleExportPdfOccupancy}
+                disabled={filteredList.length === 0}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white rounded transition-colors shadow-2xs cursor-pointer disabled:opacity-50"
+                title="Generar reporte PDF de ocupación con portada y resumen"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>Exportar a PDF</span>
+              </button>
+            </>
+          )}
         </div>
       </div>
 
-      {/* Report Module Tabs */}
-      <div className="border-b border-slate-200 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-2">
+      {/* Report Module Horizontal Tabs */}
+      <div className="border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex items-center gap-2 overflow-x-auto">
           <button
             type="button"
-            onClick={() => setActiveTab('capacidad')}
-            className={`px-4 py-2.5 text-xs font-bold font-mono border-b-2 transition-all flex items-center gap-2 ${
-              activeTab === 'capacidad'
+            onClick={() => setActiveTab('ocupacion')}
+            className={`px-4 py-2.5 text-xs font-bold font-mono border-b-2 transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+              activeTab === 'ocupacion'
                 ? 'border-blue-600 text-blue-600 bg-blue-50/30'
                 : 'border-transparent text-slate-600 hover:text-slate-900 hover:border-slate-300'
             }`}
           >
-            <BarChart3 className="w-4 h-4" />
-            <span>Capacidad & Expansión de Inventario</span>
+            <Network className="w-4 h-4" />
+            <span>Ocupación de Red</span>
             {kpis.critCount > 0 && (
               <span className="text-[10px] bg-rose-600 text-white px-1.5 py-0.2 rounded-full font-bold animate-pulse">
                 {kpis.critCount} críticos
@@ -358,52 +460,56 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
 
           <button
             type="button"
-            onClick={() => setActiveTab('conectividad')}
-            className={`px-4 py-2.5 text-xs font-bold font-mono border-b-2 transition-all flex items-center gap-2 ${
-              activeTab === 'conectividad'
+            onClick={() => setActiveTab('ubicacion')}
+            className={`px-4 py-2.5 text-xs font-bold font-mono border-b-2 transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+              activeTab === 'ubicacion'
                 ? 'border-blue-600 text-blue-600 bg-blue-50/30'
                 : 'border-transparent text-slate-600 hover:text-slate-900 hover:border-slate-300'
             }`}
           >
-            <Cpu className="w-4 h-4" />
-            <span>Matriz de Dispositivos Conectados</span>
+            <MapPin className="w-4 h-4" />
+            <span>Inventario por Ubicación</span>
+            <span className="text-[10px] bg-slate-100 text-slate-700 border border-slate-200 px-1.5 py-0.2 rounded-full font-bold">
+              {equipos.length + camaras.length}
+            </span>
           </button>
 
           <button
             type="button"
-            onClick={() => setActiveTab('futuros')}
-            className={`px-4 py-2.5 text-xs font-bold font-mono border-b-2 transition-all flex items-center gap-2 ${
-              activeTab === 'futuros'
+            onClick={() => setActiveTab('intervenciones')}
+            className={`px-4 py-2.5 text-xs font-bold font-mono border-b-2 transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+              activeTab === 'intervenciones'
                 ? 'border-blue-600 text-blue-600 bg-blue-50/30'
                 : 'border-transparent text-slate-600 hover:text-slate-900 hover:border-slate-300'
             }`}
           >
-            <Sparkles className="w-4 h-4 text-amber-500" />
-            <span>Próximos Reportes</span>
+            <Wrench className="w-4 h-4" />
+            <span>Intervenciones por Dispositivo</span>
           </button>
         </div>
 
-        {/* Standard Threshold Legend Strip */}
-        <div className="hidden lg:flex items-center gap-3 text-[11px] font-mono text-slate-600 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200">
-          <span className="font-semibold text-slate-700">Norma Ocupación:</span>
-          <span className="flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
-            <span>&lt;73% Verde (Holgura)</span>
-          </span>
-          <span className="text-slate-300">•</span>
-          <span className="flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-full bg-amber-500" />
-            <span>74-77% Amarillo (Alerta Límite)</span>
-          </span>
-          <span className="text-slate-300">•</span>
-          <span className="flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-full bg-rose-500" />
-            <span>&ge;78% Rojo (Ampliación Requerida)</span>
-          </span>
-        </div>
+        {activeTab === 'ocupacion' && (
+          <div className="hidden lg:flex items-center gap-3 text-[11px] font-mono text-slate-600 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200">
+            <span className="font-semibold text-slate-700">Norma Ocupación:</span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+              <span>&lt;73% Verde (Holgura)</span>
+            </span>
+            <span className="text-slate-300">•</span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-amber-500" />
+              <span>74-77% Amarillo (Alerta Límite)</span>
+            </span>
+            <span className="text-slate-300">•</span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-rose-500" />
+              <span>&ge;78% Rojo (Ampliación Requerida)</span>
+            </span>
+          </div>
+        )}
       </div>
 
-      {activeTab === 'capacidad' && (
+      {activeTab === 'ocupacion' && (
         <div className="space-y-6">
           {/* Executive KPI Cards Grid */}
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -845,120 +951,33 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         </div>
       )}
 
-      {activeTab === 'conectividad' && (
-        <div className="bg-white border border-slate-200 rounded-lg p-6 shadow-xs font-mono text-xs space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-            <div>
-              <h2 className="text-base font-bold text-slate-900">Matriz Integral de Conectividad</h2>
-              <p className="text-slate-500 text-xs mt-0.5">
-                Relación extremo a extremo: Cámara &rarr; Patch Panel &rarr; Switch PoE &rarr; Grabador NVR
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={handleExportCSV}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white rounded transition-colors"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Exportar Matriz CSV</span>
-            </button>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-slate-50 border-b border-slate-200 text-[10px] text-slate-500 uppercase">
-                <tr>
-                  <th className="py-2.5 px-3">Cámara</th>
-                  <th className="py-2.5 px-3">IP / Modelo</th>
-                  <th className="py-2.5 px-3">Patch Panel</th>
-                  <th className="py-2.5 px-3">Puerto Patch</th>
-                  <th className="py-2.5 px-3">Switch PoE</th>
-                  <th className="py-2.5 px-3">Puerto Switch</th>
-                  <th className="py-2.5 px-3">NVR</th>
-                  <th className="py-2.5 px-3">Canal NVR</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {camaras.map(cam => (
-                  <tr key={cam.id} className="hover:bg-slate-50">
-                    <td className="py-2 px-3 font-bold text-slate-900 flex items-center gap-1.5">
-                      <Camera className="w-3.5 h-3.5 text-blue-600" />
-                      <span>{cam.codigo}</span>
-                    </td>
-                    <td className="py-2 px-3 text-slate-600">
-                      <span>{cam.direccion_ip || '-'}</span>
-                      <span className="text-[10px] text-slate-400 block">{cam.modelo || cam.tipo_dispositivo || ''}</span>
-                    </td>
-                    <td className="py-2 px-3 text-slate-700 font-semibold">
-                      {cam.patch_panel?.codigo || '-'}
-                    </td>
-                    <td className="py-2 px-3 text-blue-700 font-bold">
-                      {cam.puerto_patch ? `P${cam.puerto_patch}` : '-'}
-                    </td>
-                    <td className="py-2 px-3 text-slate-700 font-semibold">
-                      {cam.switch?.codigo || '-'}
-                    </td>
-                    <td className="py-2 px-3 text-blue-700 font-bold">
-                      {cam.puerto_switch || '-'}
-                    </td>
-                    <td className="py-2 px-3 text-indigo-700 font-semibold">
-                      {cam.nvr?.codigo || '-'}
-                    </td>
-                    <td className="py-2 px-3 text-indigo-700 font-bold">
-                      {cam.canal_nvr ? `CH ${cam.canal_nvr}` : '-'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+      {activeTab === 'ubicacion' && (
+        <LocationInventoryReport
+          sedes={sedes}
+          campusList={campusList}
+          edificios={edificios}
+          pisos={pisos}
+          racks={racks}
+          equipos={equipos}
+          camaras={camaras}
+          onSelectCamera={onSelectCamera}
+          onSelectRack={onSelectRack}
+          onNavigateToPorts={onNavigateToPorts}
+        />
       )}
 
-      {activeTab === 'futuros' && (
-        <div className="bg-white border border-slate-200 rounded-lg p-6 shadow-xs font-mono text-xs space-y-6">
-          <div className="flex items-center gap-3 p-4 bg-blue-50 border border-blue-200 rounded-lg text-blue-900">
-            <Sparkles className="w-6 h-6 text-blue-600 shrink-0" />
-            <div>
-              <h2 className="font-bold text-sm">Módulo Preparado para Nuevos Reportes Técnicos</h2>
-              <p className="text-slate-600 text-xs mt-0.5">
-                Esta sección centralizada está diseñada para incorporar progresivamente todos los reportes personalizados que necesites solicitar para auditorías, compras o mantenimiento.
-              </p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="p-4 rounded-lg border border-slate-200 bg-slate-50 space-y-2">
-              <div className="font-bold text-slate-800 text-sm flex items-center gap-2">
-                <BarChart3 className="w-4 h-4 text-emerald-600" />
-                <span>Auditoría de Ciclo de Vida & Garantías</span>
-              </div>
-              <p className="text-slate-500 text-[11px] font-sans leading-relaxed">
-                Reporte de antigüedad de equipos, fechas de compra, vigencia de soporte con proveedores y proyección de obsolescencia tecnológica.
-              </p>
-            </div>
-
-            <div className="p-4 rounded-lg border border-slate-200 bg-slate-50 space-y-2">
-              <div className="font-bold text-slate-800 text-sm flex items-center gap-2">
-                <Layers className="w-4 h-4 text-blue-600" />
-                <span>Ocupación de Espacio en Gabinetes (RU 19")</span>
-              </div>
-              <p className="text-slate-500 text-[11px] font-sans leading-relaxed">
-                Análisis de unidades U libres versus ocupadas por sala IDF/MDF, evaluando saturación física de bastidores según norma TIA-606-C.
-              </p>
-            </div>
-
-            <div className="p-4 rounded-lg border border-slate-200 bg-slate-50 space-y-2">
-              <div className="font-bold text-slate-800 text-sm flex items-center gap-2">
-                <Camera className="w-4 h-4 text-purple-600" />
-                <span>Bitácora de Intervenciones & Fallas</span>
-              </div>
-              <p className="text-slate-500 text-[11px] font-sans leading-relaxed">
-                Métricas de mantención preventiva vs correctiva, tiempos de respuesta técnico y recambio de repuestos por edificio o campus.
-              </p>
-            </div>
-          </div>
-        </div>
+      {activeTab === 'intervenciones' && (
+        <DeviceInterventionsReport
+          sedes={sedes}
+          campusList={campusList}
+          edificios={edificios}
+          pisos={pisos}
+          racks={racks}
+          equipos={equipos}
+          camaras={camaras}
+          onSelectCamera={onSelectCamera}
+          onSelectRack={onSelectRack}
+        />
       )}
     </div>
   );

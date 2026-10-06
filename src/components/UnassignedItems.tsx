@@ -69,7 +69,7 @@ export const UnassignedItems: React.FC<UnassignedItemsProps> = ({
   const [targetEdificioId, setTargetEdificioId] = useState('');
   const [targetPisoId, setTargetPisoId] = useState('');
   const [targetRackId, setTargetRackId] = useState('');
-  const [targetPosicionU, setTargetPosicionU] = useState<number>(1);
+  const [targetPosicionU, setTargetPosicionU] = useState<number | ''>(1);
   const [savingReassign, setSavingReassign] = useState(false);
   const [reassignError, setReassignError] = useState<string | null>(null);
   const [successToast, setSuccessToast] = useState<string | null>(null);
@@ -711,8 +711,16 @@ export const UnassignedItems: React.FC<UnassignedItemsProps> = ({
                       min="1"
                       max="48"
                       value={targetPosicionU}
-                      onChange={(e) => setTargetPosicionU(parseInt(e.target.value) || 1)}
-                      className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs"
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === '') setTargetPosicionU('' as any);
+                        else {
+                          const n = parseInt(val, 10);
+                          if (!isNaN(n)) setTargetPosicionU(n);
+                        }
+                      }}
+                      placeholder="1"
+                      className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs font-mono"
                     />
                   </div>
                 </div>

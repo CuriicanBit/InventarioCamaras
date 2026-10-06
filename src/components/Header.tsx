@@ -14,7 +14,8 @@ import {
   Menu,
   X,
   ChevronRight,
-  BarChart3
+  BarChart3,
+  Network
 } from 'lucide-react';
 
 export type NavView = 
@@ -23,6 +24,9 @@ export type NavView =
   | 'puertos' 
   | 'camara' 
   | 'registro' 
+  | 'puntos_red'
+  | 'punto_red_registro'
+  | 'punto_red_detalle'
   | 'mantenimiento' 
   | 'inventario' 
   | 'planimetria'
@@ -96,10 +100,11 @@ export const Header: React.FC<HeaderProps> = ({
     { id: 'elevacion', label: 'Diagrama de Rack', icon: <Server className="w-3.5 h-3.5" /> },
     { id: 'puertos', label: 'Mapeo de Puertos', icon: <Cpu className="w-3.5 h-3.5" /> },
     { id: 'camara', label: 'Ficha de Cámara', icon: <Camera className="w-3.5 h-3.5" /> },
+    { id: 'puntos_red', label: 'Puntos de Red', icon: <Network className="w-3.5 h-3.5" /> },
     { id: 'registro', label: 'Registro Terreno', icon: <PlusCircle className="w-3.5 h-3.5" /> },
     { id: 'mantenimiento', label: 'Bitácora / Mantención', icon: <Wrench className="w-3.5 h-3.5" /> },
     { id: 'inventario', label: 'Inventario General', icon: <ListFilter className="w-3.5 h-3.5" /> },
-    { id: 'reportes', label: 'Reportes & Ocupación', icon: <BarChart3 className="w-3.5 h-3.5" /> },
+    { id: 'reportes', label: 'Reportes', icon: <BarChart3 className="w-3.5 h-3.5" /> },
     { id: 'planimetria', label: 'Planimetría FOV', icon: <MapPin className="w-3.5 h-3.5" /> },
     { 
       id: 'bodega_bajas', 
@@ -142,10 +147,13 @@ export const Header: React.FC<HeaderProps> = ({
       case 'elevacion': return `Elevación de Bastidor Rack ${selectedRackCode ? `(${selectedRackCode})` : ''}`;
       case 'puertos': return 'Matriz y Mapeo Físico de Puertos (Patch Panels & Switches)';
       case 'camara': return `Ficha Técnica de Cámara ${selectedCameraCode ? `(${selectedCameraCode})` : ''}`;
+      case 'puntos_red': return 'Listado Centralizado de Puntos de Red (Datos y WiFi AP)';
+      case 'punto_red_registro': return 'Levantamiento y Registro de Punto de Red en Terreno';
+      case 'punto_red_detalle': return 'Ficha Técnica de Punto de Red';
       case 'registro': return 'Levantamiento y Registro Rápido en Terreno (Norma TIA-606-C)';
       case 'mantenimiento': return 'Bitácora Técnica e Historial de Intervenciones';
       case 'inventario': return 'Inventario General Centralizado de Equipamiento';
-      case 'reportes': return 'Módulo de Reportes · Capacidad, Ocupación y Expansión de Inventario (Norma 75%)';
+      case 'reportes': return 'Módulo de Reportes de Infraestructura (Ocupación de Red, Inventario por Ubicación)';
       case 'planimetria': return 'Planimetría CAD y Análisis Geométrico de Cobertura';
       case 'bodega_bajas': return 'Bodega / Bajas (Equipos y Cámaras Retirados de Servicio)';
       case 'sin_asignar': return 'Bandeja de Dispositivos Sin Asignación Jerárquica';

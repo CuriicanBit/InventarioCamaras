@@ -34,7 +34,8 @@ import {
   ArrowRight,
   Camera,
   BarChart3,
-  AlertTriangle
+  AlertTriangle,
+  Wrench
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Rack, Equipo, Proveedor, Marca, Modelo, TipoEquipo, Camara } from '../types/database';
@@ -43,6 +44,8 @@ import { MarcaSelect, ModeloSelect, ProveedorSelect } from './catalogs/CatalogSe
 import { DecommissionModal } from './DecommissionModal';
 import { DeleteConfirmModal } from './DeleteConfirmModal';
 import { RackBodegaDrawer } from './RackBodegaDrawer';
+import { MaintenanceHistory } from './MaintenanceHistory';
+import { SwitchPortsTable } from './SwitchPortsTable';
 import { 
   inferUHeight, 
   calculateUInferior, 
@@ -71,6 +74,10 @@ export const RackElevation: React.FC<RackElevationProps> = ({
   const [marcas, setMarcas] = useState<Marca[]>([]);
   const [modelos, setModelos] = useState<Modelo[]>([]);
   const [selectedEquipo, setSelectedEquipo] = useState<Equipo | null>(null);
+  const selectedEquipoRef = useRef<Equipo | null>(null);
+  useEffect(() => {
+    selectedEquipoRef.current = selectedEquipo;
+  }, [selectedEquipo]);
   const [loading, setLoading] = useState(true);
 
   // Panel derecho: 'detalle' o 'bodega'
@@ -102,11 +109,12 @@ export const RackElevation: React.FC<RackElevationProps> = ({
   // Modals for lifecycle & deletion
   const [decommissionModalOpen, setDecommissionModalOpen] = useState(false);
   const [deleteConfirmModalOpen, setDeleteConfirmModalOpen] = useState(false);
+  const [showRackHistoryModal, setShowRackHistoryModal] = useState(false);
 
   // Modal for new/edit equipment
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
-  const [formAlturaU, setFormAlturaU] = useState<number>(1);
+  const [formAlturaU, setFormAlturaU] = useState<number | ''>(1);
   const [modoAvanzadoU, setModoAvanzadoU] = useState<boolean>(false);
   const [formData, setFormData] = useState<{
     id?: string;
@@ -118,8 +126,8 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     marca: string | null;
     modelo: string | null;
     numero_serie: string;
-    posicion_u_inicio: number;
-    posicion_u_fin: number;
+    posicion_u_inicio: number | '';
+    posicion_u_fin: number | '';
     ip_gestion: string;
     vlan: string;
     puertos_totales: string;
@@ -206,9 +214,11 @@ export const RackElevation: React.FC<RackElevationProps> = ({
   };
 
   // Load rack equipment, providers, brands, models, cameras, and bodega
-  const loadData = async () => {
+  const loadData = async (options?: { preserveSelectedId?: string; background?: boolean }) => {
     try {
-      setLoading(true);
+      if (!options?.background) {
+        setLoading(true);
+      }
       const [
         { data: eqData },
         { data: provData },
@@ -246,10 +256,19 @@ export const RackElevation: React.FC<RackElevationProps> = ({
         console.error('Error reading nvr uplinks:', e);
       }
 
-      // Auto-select first active switch or first device
+      // Maintain currently selected equipment if still present in rack, otherwise default to first switch or first device
       if (loadedEquipos.length > 0) {
-        const defaultSelected = loadedEquipos.find(e => e.tipo === 'switch') || loadedEquipos[0];
-        setSelectedEquipo(defaultSelected);
+        const targetId = options?.preserveSelectedId ?? selectedEquipoRef.current?.id;
+        if (targetId) {
+          const found = loadedEquipos.find(e => e.id === targetId);
+          if (found) {
+            setSelectedEquipo(found);
+          } else {
+            setSelectedEquipo(loadedEquipos.find(e => e.tipo === 'switch') || loadedEquipos[0]);
+          }
+        } else {
+          setSelectedEquipo(loadedEquipos.find(e => e.tipo === 'switch') || loadedEquipos[0]);
+        }
       } else {
         setSelectedEquipo(null);
       }
@@ -258,7 +277,9 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     } catch (err) {
       console.error('Error loading rack elevation data:', err);
     } finally {
-      setLoading(false);
+      if (!options?.background) {
+        setLoading(false);
+      }
     }
   };
 
@@ -523,17 +544,22 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     const newHeight = inferUHeight(formData.modelo, newTipo);
     setFormAlturaU(newHeight);
     const currentUSuperior = Number(formData.posicion_u_fin || totalU);
-    const newUInferior = calculateUInferior(currentUSuperior, newHeight);
+    const validUSup = currentUSuperior > 0 ? currentUSuperior : totalU;
+    const newUInferior = calculateUInferior(validUSup, newHeight);
+
+    const willBeRackeable = newTipo === 'ups' ? formData.es_rackeable !== false : true;
 
     setFormData(prev => ({
       ...prev,
       tipo: newTipo,
       modelo_id: null,
       modelo: null,
-      posicion_u_inicio: newUInferior,
+      es_rackeable: willBeRackeable,
+      posicion_u_inicio: willBeRackeable ? (prev.posicion_u_inicio && prev.posicion_u_inicio > 0 ? prev.posicion_u_inicio : newUInferior) : 0,
+      posicion_u_fin: willBeRackeable ? (prev.posicion_u_fin && prev.posicion_u_fin > 0 ? prev.posicion_u_fin : validUSup) : 0,
       puertos_totales: '',
       canales_totales: '',
-      capacidad_va: '',
+      capacidad_va: newTipo === 'ups' ? '1500' : '',
       ip_gestion: '',
       vlan: '',
     }));
@@ -561,7 +587,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
   const handleSaveEquipment = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    const isNonRackeable = formData.es_rackeable === false;
+    const isNonRackeable = formData.tipo === 'ups' && formData.es_rackeable === false;
 
     if (!isNonRackeable) {
       const uSup = Number(formData.posicion_u_fin || totalU);
@@ -1108,6 +1134,17 @@ export const RackElevation: React.FC<RackElevationProps> = ({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Botón Bitácora del Rack */}
+          <button
+            type="button"
+            onClick={() => setShowRackHistoryModal(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded transition-colors shadow-2xs cursor-pointer"
+            title="Ver Bitácora Técnica e Historial de Intervenciones de este Rack"
+          >
+            <Wrench className="w-4 h-4 text-blue-600" />
+            <span>Bitácora Rack</span>
+          </button>
+
           {/* Botón para abrir o destacar el Cajón de Bodega */}
           <button
             type="button"
@@ -1714,6 +1751,20 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                       </button>
                     </div>
                   </div>
+
+                  {/* NUEVA SECCIÓN: Puertos y VLANs (solo cuando el equipo es un Switch) */}
+                  {selectedEquipo.tipo === 'switch' && (
+                    <div className="pt-4 border-t border-slate-200">
+                      <SwitchPortsTable
+                        switchEquipo={selectedEquipo}
+                        availableSwitches={equipos.filter(e => e.tipo === 'switch')}
+                        onSelectSwitch={(sw) => setSelectedEquipo(sw)}
+                        onPortsUpdated={() => {
+                          loadData({ preserveSelectedId: selectedEquipo.id, background: true });
+                        }}
+                      />
+                    </div>
+                  )}
                 </div>
               </div>
             ) : equipos.length === 0 ? (
@@ -1873,7 +1924,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                     <Server className="w-3.5 h-3.5 text-blue-600" />
                     <span>Disposición & Ubicación Física</span>
                   </label>
-                  {formData.es_rackeable !== false && (
+                  {(formData.tipo !== 'ups' || formData.es_rackeable !== false) && (
                     <button
                       type="button"
                       onClick={() => setModoAvanzadoU(!modoAvanzadoU)}
@@ -1884,60 +1935,62 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                   )}
                 </div>
 
-                {/* Selector de Modalidad: Montado en Bastidor vs Piso del Shaft (No Rackeable) */}
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setFormData(prev => ({
-                        ...prev,
-                        es_rackeable: true,
-                        posicion_u_inicio: prev.posicion_u_inicio && prev.posicion_u_inicio > 0 ? prev.posicion_u_inicio : 1,
-                        posicion_u_fin: prev.posicion_u_fin && prev.posicion_u_fin > 0 ? prev.posicion_u_fin : 1
-                      }));
-                    }}
-                    className={`p-2.5 rounded-lg border text-left flex flex-col gap-1 transition-all ${
-                      formData.es_rackeable !== false
-                        ? 'bg-blue-50/90 border-blue-500 ring-1 ring-blue-500 text-blue-950 font-semibold'
-                        : 'bg-white border-slate-200 hover:bg-slate-100 text-slate-700'
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <Server className="w-3.5 h-3.5 text-blue-600" />
-                      <span className="font-bold">Montado en Bastidor</span>
-                    </div>
-                    <span className="text-[10px] text-slate-500 font-normal">
-                      Estándar 19", ocupa unidades U (1U - {totalU}U)
-                    </span>
-                  </button>
+                {/* Selector de Modalidad: Montado en Bastidor vs Piso del Shaft (No Rackeable) - ÚNICAMENTE PARA UPS */}
+                {formData.tipo === 'ups' && (
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFormData(prev => ({
+                          ...prev,
+                          es_rackeable: true,
+                          posicion_u_inicio: prev.posicion_u_inicio && prev.posicion_u_inicio > 0 ? prev.posicion_u_inicio : 1,
+                          posicion_u_fin: prev.posicion_u_fin && prev.posicion_u_fin > 0 ? prev.posicion_u_fin : 1
+                        }));
+                      }}
+                      className={`p-2.5 rounded-lg border text-left flex flex-col gap-1 transition-all ${
+                        formData.es_rackeable !== false
+                          ? 'bg-blue-50/90 border-blue-500 ring-1 ring-blue-500 text-blue-950 font-semibold'
+                          : 'bg-white border-slate-200 hover:bg-slate-100 text-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <Server className="w-3.5 h-3.5 text-blue-600" />
+                        <span className="font-bold">Montado en Bastidor</span>
+                      </div>
+                      <span className="text-[10px] text-slate-500 font-normal">
+                        Estándar 19", ocupa unidades U (1U - {totalU}U)
+                      </span>
+                    </button>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setFormData(prev => ({
-                        ...prev,
-                        es_rackeable: false,
-                        posicion_u_inicio: 0,
-                        posicion_u_fin: 0
-                      }));
-                    }}
-                    className={`p-2.5 rounded-lg border text-left flex flex-col gap-1 transition-all ${
-                      formData.es_rackeable === false
-                        ? 'bg-amber-50/90 border-amber-500 ring-1 ring-amber-500 text-amber-950 font-semibold'
-                        : 'bg-white border-slate-200 hover:bg-slate-100 text-slate-700'
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <Zap className="w-3.5 h-3.5 text-amber-600" />
-                      <span className="font-bold">Piso / Shaft (No Rackeable)</span>
-                    </div>
-                    <span className="text-[10px] text-slate-500 font-normal">
-                      Junto al rack, ej: UPS Torre o pedestal (0U)
-                    </span>
-                  </button>
-                </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFormData(prev => ({
+                          ...prev,
+                          es_rackeable: false,
+                          posicion_u_inicio: 0,
+                          posicion_u_fin: 0
+                        }));
+                      }}
+                      className={`p-2.5 rounded-lg border text-left flex flex-col gap-1 transition-all ${
+                        formData.es_rackeable === false
+                          ? 'bg-amber-50/90 border-amber-500 ring-1 ring-amber-500 text-amber-950 font-semibold'
+                          : 'bg-white border-slate-200 hover:bg-slate-100 text-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <Zap className="w-3.5 h-3.5 text-amber-600" />
+                        <span className="font-bold">Piso / Shaft (No Rackeable)</span>
+                      </div>
+                      <span className="text-[10px] text-slate-500 font-normal">
+                        Junto al rack, ej: UPS Torre o pedestal (0U)
+                      </span>
+                    </button>
+                  </div>
+                )}
 
-                {formData.es_rackeable === false ? (
+                {formData.tipo === 'ups' && formData.es_rackeable === false ? (
                   <div className="p-3 bg-amber-50 border border-amber-200 rounded-md text-amber-900 text-[11px] space-y-1">
                     <div className="font-bold flex items-center gap-1.5 text-amber-800">
                       <Zap className="w-4 h-4 text-amber-600 shrink-0" />
@@ -1991,15 +2044,20 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                               max="12"
                               value={formAlturaU}
                               onChange={(e) => {
-                                const u = Math.max(1, parseInt(e.target.value) || 1);
-                                const uSup = Number(formData.posicion_u_fin || totalU);
-                                const uInf = calculateUInferior(uSup, u);
-                                setFormAlturaU(u);
-                                setFormData(prev => ({
-                                  ...prev,
-                                  posicion_u_inicio: uInf,
-                                  posicion_u_fin: uSup
-                                }));
+                                const val = e.target.value;
+                                if (val === '') {
+                                  setFormAlturaU('' as any);
+                                } else {
+                                  const u = Math.max(1, parseInt(val, 10) || 1);
+                                  const uSup = Number(formData.posicion_u_fin || totalU);
+                                  const uInf = calculateUInferior(uSup, u);
+                                  setFormAlturaU(u);
+                                  setFormData(prev => ({
+                                    ...prev,
+                                    posicion_u_inicio: uInf,
+                                    posicion_u_fin: uSup
+                                  }));
+                                }
                               }}
                               className="w-12 px-1.5 py-1 text-xs border border-slate-300 rounded text-center font-bold bg-white"
                               title="Altura manual en U"
@@ -2020,15 +2078,23 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                             min="1"
                             max={totalU}
                             required
-                            value={formData.posicion_u_fin || totalU}
+                            value={formData.posicion_u_fin}
                             onChange={(e) => {
-                              const uSup = parseInt(e.target.value) || 1;
-                              const uInf = calculateUInferior(uSup, formAlturaU);
-                              setFormData(prev => ({
-                                ...prev,
-                                posicion_u_fin: uSup,
-                                posicion_u_inicio: uInf
-                              }));
+                              const val = e.target.value;
+                              if (val === '') {
+                                setFormData(prev => ({ ...prev, posicion_u_fin: '' as any }));
+                              } else {
+                                const uSup = parseInt(val, 10);
+                                if (!isNaN(uSup)) {
+                                  const h = Number(formAlturaU) || 1;
+                                  const uInf = calculateUInferior(uSup, h);
+                                  setFormData(prev => ({
+                                    ...prev,
+                                    posicion_u_fin: uSup,
+                                    posicion_u_inicio: uInf
+                                  }));
+                                }
+                              }
                             }}
                             className="w-full px-3 py-1.5 border border-slate-300 rounded font-mono font-bold text-blue-700 text-xs focus:ring-1 focus:ring-blue-600 bg-white"
                           />
@@ -2045,10 +2111,18 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                             max={totalU}
                             value={formData.posicion_u_inicio}
                             onChange={(e) => {
-                              const uInf = parseInt(e.target.value) || 1;
-                              const uSup = Math.max(uInf, formData.posicion_u_fin);
-                              setFormData(prev => ({ ...prev, posicion_u_inicio: uInf, posicion_u_fin: uSup }));
-                              setFormAlturaU(uSup - uInf + 1);
+                              const val = e.target.value;
+                              if (val === '') {
+                                setFormData(prev => ({ ...prev, posicion_u_inicio: '' as any }));
+                              } else {
+                                const uInf = parseInt(val, 10);
+                                if (!isNaN(uInf)) {
+                                  const curSup = Number(formData.posicion_u_fin) || uInf;
+                                  const uSup = Math.max(uInf, curSup);
+                                  setFormData(prev => ({ ...prev, posicion_u_inicio: uInf, posicion_u_fin: uSup }));
+                                  setFormAlturaU(uSup - uInf + 1);
+                                }
+                              }
                             }}
                             className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs font-mono bg-white"
                           />
@@ -2061,10 +2135,18 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                             max={totalU}
                             value={formData.posicion_u_fin}
                             onChange={(e) => {
-                              const uSup = parseInt(e.target.value) || 1;
-                              const uInf = Math.min(uSup, formData.posicion_u_inicio);
-                              setFormData(prev => ({ ...prev, posicion_u_fin: uSup, posicion_u_inicio: uInf }));
-                              setFormAlturaU(uSup - uInf + 1);
+                              const val = e.target.value;
+                              if (val === '') {
+                                setFormData(prev => ({ ...prev, posicion_u_fin: '' as any }));
+                              } else {
+                                const uSup = parseInt(val, 10);
+                                if (!isNaN(uSup)) {
+                                  const curInf = Number(formData.posicion_u_inicio) || uSup;
+                                  const uInf = Math.min(uSup, curInf);
+                                  setFormData(prev => ({ ...prev, posicion_u_fin: uSup, posicion_u_inicio: uInf }));
+                                  setFormAlturaU(uSup - uInf + 1);
+                                }
+                              }
                             }}
                             className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs font-mono bg-white"
                           />
@@ -2077,10 +2159,11 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                 {/* Feedback en vivo de validación */}
                 {(() => {
                   const uSup = Number(formData.posicion_u_fin || totalU);
-                  const uInf = calculateUInferior(uSup, formAlturaU);
+                  const hU = Number(formAlturaU) || 1;
+                  const uInf = calculateUInferior(uSup, hU);
                   const validation = validateUSlotAvailability(
                     uSup,
-                    formAlturaU,
+                    hU,
                     totalU,
                     occupiedSlotsMap,
                     isEditing ? formData.id : null
@@ -2323,7 +2406,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                     !formData.codigo.trim() ||
                     !validateUSlotAvailability(
                       Number(formData.posicion_u_fin || totalU),
-                      formAlturaU,
+                      Number(formAlturaU) || 1,
                       totalU,
                       occupiedSlotsMap,
                       isEditing ? formData.id : null
@@ -2365,6 +2448,20 @@ export const RackElevation: React.FC<RackElevationProps> = ({
             }}
           />
         </>
+      )}
+
+      {/* Modal Bitácora del Rack */}
+      {showRackHistoryModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto animate-in fade-in duration-150">
+          <div className="bg-slate-50 rounded-xl shadow-2xl border border-slate-300 max-w-6xl w-full max-h-[96vh] overflow-y-auto">
+            <MaintenanceHistory
+              entityType="rack"
+              entityId={rack.id}
+              rack={rack}
+              onBack={() => setShowRackHistoryModal(false)}
+            />
+          </div>
+        </div>
       )}
     </div>
   );

@@ -39,7 +39,8 @@ import {
   Edificio,
   Campus,
   Sede,
-  EstadoCicloVida
+  EstadoCicloVida,
+  PuertoSwitchOcupacion
 } from '../types/database';
 import { MarcaSelect, ModeloSelect, ProveedorSelect } from './catalogs/CatalogSelectors';
 import { DecommissionModal } from './DecommissionModal';
@@ -88,7 +89,70 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
   // Edit Camera Modal
   const [isEditing, setIsEditing] = useState(false);
   const [editFormData, setEditFormData] = useState<Partial<Camara>>({});
+  const [editSwitchPorts, setEditSwitchPorts] = useState<PuertoSwitchOcupacion[]>([]);
+  const [occupiedPpPorts, setOccupiedPpPorts] = useState<{ [port: number]: string }>({});
   const [saving, setSaving] = useState(false);
+
+  // Load switch ports (RJ45 only, excluding SFP) when editing switch_id
+  useEffect(() => {
+    if (!editFormData.switch_id) {
+      setEditSwitchPorts([]);
+      return;
+    }
+    const loadPorts = async () => {
+      try {
+        const { data } = await supabase
+          .from('v_puertos_switch_ocupacion')
+          .select('*')
+          .eq('switch_id', editFormData.switch_id)
+          .order('numero_puerto');
+        // Exclude SFP ports for camera final device
+        const rj45Only = (data || []).filter(p => p.tipo_puerto !== 'sfp');
+        setEditSwitchPorts(rj45Only);
+      } catch (err) {
+        console.error('Error loading switch ports for camera edit:', err);
+      }
+    };
+    loadPorts();
+  }, [editFormData.switch_id]);
+
+  // Load patch panel ports occupancy when editing patch_panel_id
+  useEffect(() => {
+    if (!editFormData.patch_panel_id) {
+      setOccupiedPpPorts({});
+      return;
+    }
+    const loadPpOccupancy = async () => {
+      try {
+        const [
+          { data: cams },
+          { data: puntos },
+        ] = await Promise.all([
+          supabase
+            .from('camaras')
+            .select('id, codigo, puerto_patch')
+            .eq('patch_panel_id', editFormData.patch_panel_id)
+            .neq('id', currentCam.id),
+          supabase
+            .from('puntos_red')
+            .select('id, codigo, puerto_patch')
+            .eq('patch_panel_id', editFormData.patch_panel_id),
+        ]);
+
+        const occMap: { [port: number]: string } = {};
+        (cams || []).forEach(c => {
+          if (c.puerto_patch) occMap[c.puerto_patch] = c.codigo;
+        });
+        (puntos || []).forEach(pt => {
+          if (pt.puerto_patch) occMap[pt.puerto_patch] = pt.codigo;
+        });
+        setOccupiedPpPorts(occMap);
+      } catch (err) {
+        console.error('Error loading patch panel occupancy for camera edit:', err);
+      }
+    };
+    loadPpOccupancy();
+  }, [editFormData.patch_panel_id, currentCam.id]);
 
   // Lifecycle & Delete modals
   const [decommissionModalOpen, setDecommissionModalOpen] = useState(false);
@@ -200,9 +264,9 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
       patch_panel_id: currentCam.patch_panel_id || null,
       switch_id: currentCam.switch_id || null,
       nvr_id: currentCam.nvr_id || null,
-      puerto_patch: currentCam.puerto_patch || 8,
-      puerto_switch: currentCam.puerto_switch || 'Fa0/8',
-      canal_nvr: currentCam.canal_nvr || 8,
+      puerto_patch: currentCam.puerto_patch ?? null,
+      puerto_switch: currentCam.puerto_switch ? (String(currentCam.puerto_switch).match(/\d+$/)?.[0] || String(currentCam.puerto_switch)) : null,
+      canal_nvr: currentCam.canal_nvr ?? null,
       posicion_x: currentCam.posicion_x ?? 50,
       posicion_y: currentCam.posicion_y ?? 50,
       ambiente: currentCam.ambiente || 'interior',
@@ -315,6 +379,73 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
       const finalZoom = isPtz ? (editFormData.zoom_optico || null) : null;
       const finalNumSensores = isMultisensor ? (editFormData.num_sensores || 4) : null;
 
+      // 1. Validar puerto de Patch Panel no ocupado
+      if (editFormData.patch_panel_id && editFormData.puerto_patch) {
+        const portNum = Number(editFormData.puerto_patch);
+        // Validar contra otras cámaras en ese patch panel
+        const { data: occCam } = await supabase
+          .from('camaras')
+          .select('id, codigo')
+          .eq('patch_panel_id', editFormData.patch_panel_id)
+          .eq('puerto_patch', portNum)
+          .neq('id', currentCam.id)
+          .maybeSingle();
+
+        if (occCam) {
+          alert(`Error de validación: El puerto ${portNum} del Patch Panel ya está ocupado por la cámara "${occCam.codigo}". Por favor selecciona un puerto libre.`);
+          setSaving(false);
+          return;
+        }
+
+        // Validar contra puntos de red en ese patch panel
+        const { data: occPunto } = await supabase
+          .from('puntos_red')
+          .select('id, codigo')
+          .eq('patch_panel_id', editFormData.patch_panel_id)
+          .eq('puerto_patch', portNum)
+          .maybeSingle();
+
+        if (occPunto) {
+          alert(`Error de validación: El puerto ${portNum} del Patch Panel ya está ocupado por el punto de red "${occPunto.codigo}". Por favor selecciona un puerto libre.`);
+          setSaving(false);
+          return;
+        }
+      }
+
+      // 2. Validar puerto de Switch no ocupado
+      let cleanSwitchPort: string | null = null;
+      if (editFormData.switch_id && editFormData.puerto_switch) {
+        cleanSwitchPort = String(editFormData.puerto_switch).match(/\d+$/)?.[0] || String(editFormData.puerto_switch).trim();
+        const pNum = parseInt(cleanSwitchPort, 10);
+
+        // Validar en puertos de switch cargados
+        const matchedSwPort = editSwitchPorts.find(p => p.numero_puerto === pNum);
+        if (matchedSwPort?.ocupado_por_codigo && matchedSwPort.ocupado_por_codigo !== currentCam.codigo) {
+          alert(`Error de validación: El puerto ${cleanSwitchPort} del Switch ya está ocupado por "${matchedSwPort.ocupado_por_codigo}" (${matchedSwPort.ocupado_por_tipo === 'camara' ? 'Cámara' : 'Punto de red'}). Por favor selecciona un puerto libre.`);
+          setSaving(false);
+          return;
+        }
+
+        // Validar directamente en base de datos contra otras cámaras
+        const { data: swCams } = await supabase
+          .from('camaras')
+          .select('id, codigo, puerto_switch')
+          .eq('switch_id', editFormData.switch_id)
+          .neq('id', currentCam.id);
+
+        const conflictingCam = (swCams || []).find(c => {
+          if (!c.puerto_switch) return false;
+          const cP = String(c.puerto_switch).match(/\d+$/)?.[0] || String(c.puerto_switch);
+          return cP === cleanSwitchPort;
+        });
+
+        if (conflictingCam) {
+          alert(`Error de validación: El puerto ${cleanSwitchPort} del Switch ya está ocupado por la cámara "${conflictingCam.codigo}". Por favor selecciona un puerto libre.`);
+          setSaving(false);
+          return;
+        }
+      }
+
       const payload: any = {
         codigo: editFormData.codigo?.trim() || currentCam.codigo,
         piso_id: editFormData.piso_id || currentCam.piso_id,
@@ -323,7 +454,7 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
         switch_id: editFormData.switch_id || null,
         nvr_id: editFormData.nvr_id || null,
         puerto_patch: editFormData.puerto_patch ? Number(editFormData.puerto_patch) : null,
-        puerto_switch: editFormData.puerto_switch?.trim() || null,
+        puerto_switch: cleanSwitchPort,
         canal_nvr: editFormData.canal_nvr ? Number(editFormData.canal_nvr) : null,
         marca_id: editFormData.marca_id || null,
         modelo_id: editFormData.modelo_id || null,
@@ -1059,9 +1190,13 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                     <input
                       type="number"
                       step="0.1"
-                      value={editFormData.resolucion_mp || 4}
-                      onChange={(e) => setEditFormData({ ...editFormData, resolucion_mp: parseFloat(e.target.value) || 4 })}
-                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                      value={editFormData.resolucion_mp ?? ''}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setEditFormData({ ...editFormData, resolucion_mp: val === '' ? ('' as any) : parseFloat(val) });
+                      }}
+                      placeholder="4"
+                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
                     />
                   </div>
                   <div>
@@ -1069,9 +1204,13 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                     <input
                       type="number"
                       step="0.1"
-                      value={editFormData.altura_montaje_m || 2.8}
-                      onChange={(e) => setEditFormData({ ...editFormData, altura_montaje_m: parseFloat(e.target.value) || 2.8 })}
-                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                      value={editFormData.altura_montaje_m ?? ''}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setEditFormData({ ...editFormData, altura_montaje_m: val === '' ? ('' as any) : parseFloat(val) });
+                      }}
+                      placeholder="2.8"
+                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
                     />
                   </div>
                 </div>
@@ -1091,25 +1230,33 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                           value={editFormData.lente || ''}
                           onChange={(e) => setEditFormData({ ...editFormData, lente: e.target.value })}
                           placeholder="2.8mm"
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
                         />
                       </div>
                       <div>
                         <label className="block text-[11px] text-slate-700 font-semibold mb-1">Apertura FOV (°)</label>
                         <input
                           type="number"
-                          value={editFormData.apertura_fov || 103}
-                          onChange={(e) => setEditFormData({ ...editFormData, apertura_fov: parseInt(e.target.value) || 103 })}
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                          value={editFormData.apertura_fov ?? ''}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setEditFormData({ ...editFormData, apertura_fov: val === '' ? ('' as any) : parseInt(val, 10) });
+                          }}
+                          placeholder="103"
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
                         />
                       </div>
                       <div>
                         <label className="block text-[11px] text-slate-700 font-semibold mb-1">Azimut Orientación (°)</label>
                         <input
                           type="number"
-                          value={editFormData.azimut ?? 90}
-                          onChange={(e) => setEditFormData({ ...editFormData, azimut: parseInt(e.target.value) || 0 })}
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                          value={editFormData.azimut ?? ''}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setEditFormData({ ...editFormData, azimut: val === '' ? ('' as any) : parseInt(val, 10) });
+                          }}
+                          placeholder="90"
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
                         />
                       </div>
                     </div>
@@ -1123,7 +1270,7 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                         value={editFormData.zoom_optico || ''}
                         onChange={(e) => setEditFormData({ ...editFormData, zoom_optico: e.target.value })}
                         placeholder="ej. 25x o 32x"
-                        className="w-full max-w-xs px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                        className="w-full max-w-xs px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
                       />
                       <p className="text-[10px] text-slate-500 mt-1">
                         Apertura fijada automáticamente en 360° panorámico y azimut en null.
@@ -1137,16 +1284,22 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                         <label className="block text-[11px] text-slate-700 font-semibold mb-1">Apertura FOV Fisheye (°)</label>
                         <input
                           type="number"
-                          value={editFormData.apertura_fov || 360}
+                          value={editFormData.apertura_fov ?? ''}
                           onChange={(e) => {
-                            const val = parseInt(e.target.value) || 360;
-                            setEditFormData({
-                              ...editFormData,
-                              apertura_fov: val,
-                              azimut: val >= 360 ? null : (editFormData.azimut ?? 90),
-                            });
+                            const val = e.target.value;
+                            if (val === '') {
+                              setEditFormData({ ...editFormData, apertura_fov: '' as any });
+                            } else {
+                              const num = parseInt(val, 10);
+                              setEditFormData({
+                                ...editFormData,
+                                apertura_fov: isNaN(num) ? ('' as any) : num,
+                                azimut: num >= 360 ? null : (editFormData.azimut ?? 90),
+                              });
+                            }
                           }}
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                          placeholder="360"
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
                         />
                         <span className="text-[10px] text-slate-500">360° Techo o 180° Muro</span>
                       </div>
@@ -1155,9 +1308,13 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                           <label className="block text-[11px] text-slate-700 font-semibold mb-1">Azimut Muro (°)</label>
                           <input
                             type="number"
-                            value={editFormData.azimut ?? 90}
-                            onChange={(e) => setEditFormData({ ...editFormData, azimut: parseInt(e.target.value) || 0 })}
-                            className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                            value={editFormData.azimut ?? ''}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setEditFormData({ ...editFormData, azimut: val === '' ? ('' as any) : parseInt(val, 10) });
+                            }}
+                            placeholder="90"
+                            className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
                           />
                         </div>
                       )}
@@ -1172,27 +1329,39 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                           type="number"
                           min="2"
                           max="8"
-                          value={editFormData.num_sensores || 4}
-                          onChange={(e) => setEditFormData({ ...editFormData, num_sensores: parseInt(e.target.value) || 4 })}
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                          value={editFormData.num_sensores ?? ''}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setEditFormData({ ...editFormData, num_sensores: val === '' ? ('' as any) : parseInt(val, 10) });
+                          }}
+                          placeholder="4"
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
                         />
                       </div>
                       <div>
                         <label className="block text-[11px] text-slate-700 font-semibold mb-1">FOV Total (°)</label>
                         <input
                           type="number"
-                          value={editFormData.apertura_fov || 180}
-                          onChange={(e) => setEditFormData({ ...editFormData, apertura_fov: parseInt(e.target.value) || 180 })}
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                          value={editFormData.apertura_fov ?? ''}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setEditFormData({ ...editFormData, apertura_fov: val === '' ? ('' as any) : parseInt(val, 10) });
+                          }}
+                          placeholder="180"
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
                         />
                       </div>
                       <div>
                         <label className="block text-[11px] text-slate-700 font-semibold mb-1">Azimut Central (°)</label>
                         <input
                           type="number"
-                          value={editFormData.azimut ?? 90}
-                          onChange={(e) => setEditFormData({ ...editFormData, azimut: parseInt(e.target.value) || 0 })}
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                          value={editFormData.azimut ?? ''}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setEditFormData({ ...editFormData, azimut: val === '' ? ('' as any) : parseInt(val, 10) });
+                          }}
+                          placeholder="90"
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
                         />
                       </div>
                     </div>
@@ -1265,7 +1434,7 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                     <div className="flex gap-1.5">
                       <select
                         value={editFormData.patch_panel_id || ''}
-                        onChange={(e) => setEditFormData({ ...editFormData, patch_panel_id: e.target.value || null })}
+                        onChange={(e) => setEditFormData({ ...editFormData, patch_panel_id: e.target.value || null, puerto_patch: null })}
                         className="w-full px-2 py-1.5 border border-slate-300 rounded bg-white text-xs truncate"
                       >
                         <option value="">(Ninguno)</option>
@@ -1273,25 +1442,49 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                           <option key={pp.id} value={pp.id}>{pp.codigo}</option>
                         ))}
                       </select>
-                      <input
-                        type="number"
-                        min="1"
-                        max="48"
-                        value={editFormData.puerto_patch || 8}
-                        onChange={(e) => setEditFormData({ ...editFormData, puerto_patch: parseInt(e.target.value) || 1 })}
-                        className="w-16 px-2 py-1.5 border border-slate-300 rounded bg-white text-xs text-center"
-                        title="N° Puerto"
-                      />
+                      {editFormData.patch_panel_id ? (
+                        <select
+                          value={editFormData.puerto_patch ?? ''}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setEditFormData({ ...editFormData, puerto_patch: val === '' ? (null as any) : parseInt(val, 10) });
+                          }}
+                          className="w-36 px-2 py-1.5 border border-slate-300 rounded bg-white text-xs font-mono font-semibold truncate"
+                        >
+                          <option value="">(Puerto Patch)</option>
+                          {Array.from({
+                            length: (rackPatchPanels.find(pp => pp.id === editFormData.patch_panel_id)?.puertos_totales || 24)
+                          }, (_, i) => i + 1).map(portNum => {
+                            const occupiedBy = occupiedPpPorts[portNum];
+                            const isOccupied = Boolean(occupiedBy);
+                            let label = `P.${String(portNum).padStart(2, '0')}`;
+                            if (isOccupied) label += ` · ✗ Ocupado (${occupiedBy})`;
+                            else label += ` · ✓ Libre`;
+                            return (
+                              <option key={portNum} value={portNum} disabled={isOccupied} className={isOccupied ? 'text-slate-400 bg-slate-50' : 'text-slate-900 font-bold'}>
+                                {label}
+                              </option>
+                            );
+                          })}
+                        </select>
+                      ) : (
+                        <input
+                          type="text"
+                          disabled
+                          placeholder="-"
+                          className="w-16 px-2 py-1.5 border border-slate-200 rounded bg-slate-50 text-slate-400 text-xs text-center font-mono cursor-not-allowed"
+                        />
+                      )}
                     </div>
                   </div>
 
                   {/* Switch */}
                   <div>
-                    <label className="block text-[11px] text-slate-600 mb-1">Switch & Puerto</label>
+                    <label className="block text-[11px] text-slate-600 mb-1">Switch & Puerto (RJ45)</label>
                     <div className="flex gap-1.5">
                       <select
                         value={editFormData.switch_id || ''}
-                        onChange={(e) => setEditFormData({ ...editFormData, switch_id: e.target.value || null })}
+                        onChange={(e) => setEditFormData({ ...editFormData, switch_id: e.target.value || null, puerto_switch: null })}
                         className="w-full px-2 py-1.5 border border-slate-300 rounded bg-white text-xs truncate"
                       >
                         <option value="">(Ninguno)</option>
@@ -1299,13 +1492,37 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                           <option key={sw.id} value={sw.id}>{sw.codigo}</option>
                         ))}
                       </select>
-                      <input
-                        type="text"
-                        value={editFormData.puerto_switch || 'Fa0/8'}
-                        onChange={(e) => setEditFormData({ ...editFormData, puerto_switch: e.target.value })}
-                        className="w-20 px-2 py-1.5 border border-slate-300 rounded bg-white text-xs text-center font-mono"
-                        placeholder="Fa0/8"
-                      />
+                      {editSwitchPorts.length > 0 ? (
+                        <select
+                          value={editFormData.puerto_switch ? (String(editFormData.puerto_switch).match(/\d+$/)?.[0] || String(editFormData.puerto_switch)) : ''}
+                          onChange={(e) => setEditFormData({ ...editFormData, puerto_switch: e.target.value })}
+                          className="w-36 px-2 py-1.5 border border-slate-300 rounded bg-white text-xs font-mono font-semibold truncate"
+                        >
+                          <option value="">(Puerto RJ45)</option>
+                          {editSwitchPorts.map(p => {
+                            const isOccupied = Boolean(p.ocupado_por_codigo) && p.ocupado_por_codigo !== currentCam.codigo;
+                            const portVal = String(p.numero_puerto);
+                            const vNum = p.vlan_numero ?? p.vlan;
+                            let label = `P.${p.numero_puerto} (Fa0/${p.numero_puerto})`;
+                            if (vNum) label += ` [VLAN ${vNum}]`;
+                            if (isOccupied) label += ` · ✗ Ocupado (${p.ocupado_por_codigo})`;
+                            else label += ` · ✓ Libre`;
+                            return (
+                              <option key={p.puerto_switch_id} value={portVal} disabled={isOccupied} className={isOccupied ? 'text-slate-400 bg-slate-50' : 'text-slate-900 font-bold'}>
+                                {label}
+                              </option>
+                            );
+                          })}
+                        </select>
+                      ) : (
+                        <input
+                          type="text"
+                          value={editFormData.puerto_switch || ''}
+                          onChange={(e) => setEditFormData({ ...editFormData, puerto_switch: e.target.value })}
+                          className="w-20 px-2 py-1.5 border border-slate-300 rounded bg-white text-xs text-center font-mono"
+                          placeholder="Fa0/8"
+                        />
+                      )}
                     </div>
                   </div>
 
@@ -1327,9 +1544,13 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                         type="number"
                         min="1"
                         max="64"
-                        value={editFormData.canal_nvr || 8}
-                        onChange={(e) => setEditFormData({ ...editFormData, canal_nvr: parseInt(e.target.value) || 1 })}
-                        className="w-16 px-2 py-1.5 border border-slate-300 rounded bg-white text-xs text-center"
+                        value={editFormData.canal_nvr ?? ''}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setEditFormData({ ...editFormData, canal_nvr: val === '' ? ('' as any) : parseInt(val, 10) });
+                        }}
+                        className="w-16 px-2 py-1.5 border border-slate-300 rounded bg-white text-xs text-center font-mono"
+                        placeholder="1"
                         title="Canal NVR"
                       />
                     </div>

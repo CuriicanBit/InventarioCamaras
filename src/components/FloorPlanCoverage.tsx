@@ -73,11 +73,11 @@ export const FloorPlanCoverage: React.FC<FloorPlanCoverageProps> = ({
   const [isEditing, setIsEditing] = useState(false);
   const [editTipo, setEditTipo] = useState<TipoCamara>('domo');
   const [editLente, setEditLente] = useState('');
-  const [editFov, setEditFov] = useState(103);
-  const [editAzimut, setEditAzimut] = useState<number | null>(90);
-  const [editAlcance, setEditAlcance] = useState(18.5);
+  const [editFov, setEditFov] = useState<number | ''>(103);
+  const [editAzimut, setEditAzimut] = useState<number | null | ''>(90);
+  const [editAlcance, setEditAlcance] = useState<number | ''>(18.5);
   const [editZoom, setEditZoom] = useState('');
-  const [editNumSensores, setEditNumSensores] = useState(4);
+  const [editNumSensores, setEditNumSensores] = useState<number | ''>(4);
   const [savingEdit, setSavingEdit] = useState(false);
 
   useEffect(() => {
@@ -188,11 +188,12 @@ export const FloorPlanCoverage: React.FC<FloorPlanCoverageProps> = ({
 
   const handleTipoChange = (newTipo: TipoCamara) => {
     setEditTipo(newTipo);
+    const curFov = Number(editFov) || 103;
     if (newTipo === 'domo' || newTipo === 'bullet') {
       setEditZoom('');
       setEditNumSensores(4);
       if (!editLente) setEditLente('2.8mm');
-      if (editFov >= 360) setEditFov(103);
+      if (curFov >= 360) setEditFov(103);
       if (editAzimut === null) setEditAzimut(90);
     } else if (newTipo === 'ptz') {
       setEditLente('');
@@ -210,7 +211,7 @@ export const FloorPlanCoverage: React.FC<FloorPlanCoverageProps> = ({
       setEditLente('');
       setEditZoom('');
       if (!editNumSensores) setEditNumSensores(4);
-      if (editFov < 180 || editFov >= 360) setEditFov(180);
+      if (curFov < 180 || curFov >= 360) setEditFov(180);
       if (editAzimut === null) setEditAzimut(90);
     }
   };
@@ -225,11 +226,11 @@ export const FloorPlanCoverage: React.FC<FloorPlanCoverageProps> = ({
       const isMultisensor = editTipo === 'multisensor';
       const isDomoOrBullet = editTipo === 'domo' || editTipo === 'bullet';
 
-      const finalFov = isPtz ? 360 : editFov;
-      const finalAzimut = isPtz ? null : (isFisheye && finalFov >= 360 ? null : editAzimut);
+      const finalFov = isPtz ? 360 : (Number(editFov) || 103);
+      const finalAzimut = isPtz ? null : (isFisheye && finalFov >= 360 ? null : (editAzimut === '' ? 90 : editAzimut));
       const finalLente = isDomoOrBullet ? (editLente.trim() || null) : null;
       const finalZoom = isPtz ? (editZoom.trim() || null) : null;
-      const finalNumSensores = isMultisensor ? editNumSensores : null;
+      const finalNumSensores = isMultisensor ? (Number(editNumSensores) || 4) : null;
 
       const payload: any = {
         tipo_camara: editTipo,
@@ -1174,8 +1175,16 @@ export const FloorPlanCoverage: React.FC<FloorPlanCoverageProps> = ({
                             min="30"
                             max="140"
                             value={editFov}
-                            onChange={(e) => setEditFov(parseInt(e.target.value) || 103)}
-                            className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs"
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              if (val === '') setEditFov('' as any);
+                              else {
+                                const n = parseInt(val, 10);
+                                if (!isNaN(n)) setEditFov(n);
+                              }
+                            }}
+                            placeholder="103"
+                            className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs font-mono"
                           />
                         </div>
                         <div>
@@ -1184,9 +1193,17 @@ export const FloorPlanCoverage: React.FC<FloorPlanCoverageProps> = ({
                             type="number"
                             min="0"
                             max="360"
-                            value={editAzimut ?? 90}
-                            onChange={(e) => setEditAzimut(parseInt(e.target.value) || 0)}
-                            className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs"
+                            value={editAzimut ?? ''}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              if (val === '') setEditAzimut('' as any);
+                              else {
+                                const n = parseInt(val, 10);
+                                if (!isNaN(n)) setEditAzimut(n);
+                              }
+                            }}
+                            placeholder="90"
+                            className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs font-mono"
                           />
                         </div>
                       </div>
@@ -1225,7 +1242,7 @@ export const FloorPlanCoverage: React.FC<FloorPlanCoverageProps> = ({
                               setEditAzimut(null);
                             }}
                             className={`py-1 px-2 rounded border text-xs text-center ${
-                              editFov >= 360
+                              Number(editFov) >= 360
                                 ? 'bg-blue-600 text-white border-blue-600 font-semibold'
                                 : 'bg-white text-slate-700 border-slate-300'
                             }`}
@@ -1239,7 +1256,7 @@ export const FloorPlanCoverage: React.FC<FloorPlanCoverageProps> = ({
                               if (editAzimut === null) setEditAzimut(90);
                             }}
                             className={`py-1 px-2 rounded border text-xs text-center ${
-                              editFov < 360
+                              Number(editFov) < 360
                                 ? 'bg-blue-600 text-white border-blue-600 font-semibold'
                                 : 'bg-white text-slate-700 border-slate-300'
                             }`}
@@ -1257,24 +1274,40 @@ export const FloorPlanCoverage: React.FC<FloorPlanCoverageProps> = ({
                             max="360"
                             value={editFov}
                             onChange={(e) => {
-                              const val = parseInt(e.target.value) || 360;
-                              setEditFov(val);
-                              if (val >= 360) setEditAzimut(null);
-                              else if (editAzimut === null) setEditAzimut(90);
+                              const val = e.target.value;
+                              if (val === '') {
+                                setEditFov('' as any);
+                              } else {
+                                const num = parseInt(val, 10);
+                                if (!isNaN(num)) {
+                                  setEditFov(num);
+                                  if (num >= 360) setEditAzimut(null);
+                                  else if (editAzimut === null) setEditAzimut(90);
+                                }
+                              }
                             }}
-                            className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs"
+                            placeholder="360"
+                            className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs font-mono"
                           />
                         </div>
-                        {editFov < 360 && (
+                        {Number(editFov) < 360 && (
                           <div>
                             <label className="block text-[11px] text-slate-600 mb-1">Azimut Muro (°)</label>
                             <input
                               type="number"
                               min="0"
                               max="360"
-                              value={editAzimut ?? 90}
-                              onChange={(e) => setEditAzimut(parseInt(e.target.value) || 0)}
-                              className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs"
+                              value={editAzimut ?? ''}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                if (val === '') setEditAzimut('' as any);
+                                else {
+                                  const n = parseInt(val, 10);
+                                  if (!isNaN(n)) setEditAzimut(n);
+                                }
+                              }}
+                              placeholder="90"
+                              className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs font-mono"
                             />
                           </div>
                         )}
@@ -1293,8 +1326,16 @@ export const FloorPlanCoverage: React.FC<FloorPlanCoverageProps> = ({
                             min="2"
                             max="8"
                             value={editNumSensores}
-                            onChange={(e) => setEditNumSensores(parseInt(e.target.value) || 4)}
-                            className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs"
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              if (val === '') setEditNumSensores('' as any);
+                              else {
+                                const n = parseInt(val, 10);
+                                if (!isNaN(n)) setEditNumSensores(n);
+                              }
+                            }}
+                            placeholder="4"
+                            className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs font-mono"
                           />
                         </div>
                         <div>
@@ -1304,8 +1345,16 @@ export const FloorPlanCoverage: React.FC<FloorPlanCoverageProps> = ({
                             min="90"
                             max="360"
                             value={editFov}
-                            onChange={(e) => setEditFov(parseInt(e.target.value) || 180)}
-                            className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs"
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              if (val === '') setEditFov('' as any);
+                              else {
+                                const n = parseInt(val, 10);
+                                if (!isNaN(n)) setEditFov(n);
+                              }
+                            }}
+                            placeholder="180"
+                            className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs font-mono"
                           />
                         </div>
                         <div>
@@ -1314,9 +1363,17 @@ export const FloorPlanCoverage: React.FC<FloorPlanCoverageProps> = ({
                             type="number"
                             min="0"
                             max="360"
-                            value={editAzimut ?? 90}
-                            onChange={(e) => setEditAzimut(parseInt(e.target.value) || 0)}
-                            className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs"
+                            value={editAzimut ?? ''}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              if (val === '') setEditAzimut('' as any);
+                              else {
+                                const n = parseInt(val, 10);
+                                if (!isNaN(n)) setEditAzimut(n);
+                              }
+                            }}
+                            placeholder="90"
+                            className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs font-mono"
                           />
                         </div>
                       </div>
@@ -1332,8 +1389,16 @@ export const FloorPlanCoverage: React.FC<FloorPlanCoverageProps> = ({
                       min="5"
                       max="80"
                       value={editAlcance}
-                      onChange={(e) => setEditAlcance(parseFloat(e.target.value) || 18.5)}
-                      className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs"
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === '') setEditAlcance('' as any);
+                        else {
+                          const n = parseFloat(val);
+                          if (!isNaN(n)) setEditAlcance(n);
+                        }
+                      }}
+                      placeholder="18.5"
+                      className="w-full px-2.5 py-1 border border-slate-300 rounded bg-white text-xs font-mono"
                     />
                   </div>
 

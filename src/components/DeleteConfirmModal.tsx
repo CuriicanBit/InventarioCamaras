@@ -5,7 +5,7 @@ import { supabase } from '../lib/supabase';
 interface DeleteConfirmModalProps {
   isOpen: boolean;
   onClose: () => void;
-  itemType: 'camara' | 'equipo';
+  itemType: 'camara' | 'equipo' | 'punto_red';
   itemId: string;
   itemCode: string;
   onSuccess: () => void;
@@ -35,7 +35,11 @@ export const DeleteConfirmModal: React.FC<DeleteConfirmModalProps> = ({
       setLoading(true);
       setErrorMsg(null);
 
-      const table = itemType === 'camara' ? 'camaras' : 'equipos';
+      const table = itemType === 'camara' 
+        ? 'camaras' 
+        : itemType === 'punto_red'
+        ? 'puntos_red'
+        : 'equipos';
       const { error } = await supabase
         .from(table)
         .delete()

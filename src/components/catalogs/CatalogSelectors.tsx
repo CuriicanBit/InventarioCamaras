@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { Plus, Check, X, Tag, Cpu, Building, AlertCircle, Info } from 'lucide-react';
+import { Plus, Check, X, Tag, Cpu, Building, AlertCircle, Info, Layers, Palette } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
-import { Marca, Modelo, Proveedor, TipoEquipo } from '../../types/database';
+import { Marca, Modelo, Proveedor, TipoEquipo, Vlan } from '../../types/database';
 
 // Helper to format Supabase error messages
 function formatError(err: unknown): string {
@@ -1008,6 +1008,377 @@ export const ProveedorSelect: React.FC<ProveedorSelectProps> = ({
               disabled={saving || !nombre.trim()}
               onClick={(e) => handleCreate(e)}
               className="inline-flex items-center gap-1 px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded font-semibold text-xs disabled:opacity-50"
+            >
+              {saving ? 'Guardando...' : 'Guardar y Seleccionar'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ==========================================
+// 4. SELECTOR DE VLAN CON "+ AGREGAR NUEVA..."
+// ==========================================
+export interface VlanSelectProps {
+  value?: string | number | null; // Supports VLAN id (UUID) or numero (number/string)
+  onChange: (vlanNumero: number | null, vlanId: string | null, vlanObj?: Vlan | null) => void;
+  vlans: Vlan[];
+  onVlanCreated?: (newVlan: Vlan) => void;
+  className?: string;
+  disabled?: boolean;
+  required?: boolean;
+  allowNone?: boolean;
+  noneLabel?: string;
+  placeholder?: string;
+  compact?: boolean;
+}
+
+const PRESET_VLAN_COLORS = [
+  '#2563EB', // Blue
+  '#0891B2', // Cyan
+  '#059669', // Emerald
+  '#7C3AED', // Purple
+  '#D97706', // Amber
+  '#DC2626', // Red
+  '#4F46E5', // Indigo
+  '#DB2777', // Pink
+  '#475569', // Slate
+];
+
+export const VlanSelect: React.FC<VlanSelectProps> = ({
+  value,
+  onChange,
+  vlans,
+  onVlanCreated,
+  className = '',
+  disabled = false,
+  required = false,
+  allowNone = true,
+  noneLabel = '(Sin VLAN)',
+  placeholder = 'Seleccione VLAN...',
+  compact = false,
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [newNumero, setNewNumero] = useState('');
+  const [newNombre, setNewNombre] = useState('');
+  const [newColor, setNewColor] = useState('#2563EB');
+  const [newDescripcion, setNewDescripcion] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [infoMsg, setInfoMsg] = useState<string | null>(null);
+
+  // Match active VLAN by id or by number
+  const selectedVlan = vlans.find(v => {
+    if (value === null || value === undefined || value === '') return false;
+    return v.id === value || String(v.numero) === String(value);
+  });
+
+  const selectValue = selectedVlan ? selectedVlan.id : '';
+
+  const handleSelectChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const val = e.target.value;
+    if (val === '__NEW__') {
+      setIsOpen(true);
+      setErrorMsg(null);
+      setInfoMsg(null);
+      return;
+    }
+    if (!val) {
+      onChange(null, null, null);
+      return;
+    }
+    const found = vlans.find(v => v.id === val);
+    if (found) {
+      onChange(found.numero, found.id, found);
+    } else {
+      onChange(null, null, null);
+    }
+  };
+
+  const handleCreate = async (e?: React.MouseEvent | React.KeyboardEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    const num = parseInt(newNumero.trim());
+    const name = newNombre.trim();
+
+    if (isNaN(num) || num < 1 || num > 4094) {
+      setErrorMsg('El número de VLAN debe estar entre 1 y 4094');
+      return;
+    }
+    if (!name) {
+      setErrorMsg('Debe ingresar un nombre para la VLAN');
+      return;
+    }
+
+    // Check if already in local list
+    const existingNum = vlans.find(v => v.numero === num);
+    if (existingNum) {
+      onChange(existingNum.numero, existingNum.id, existingNum);
+      setInfoMsg(`La VLAN ${num} ya existía (${existingNum.nombre}), se seleccionó`);
+      setTimeout(() => {
+        setIsOpen(false);
+        setInfoMsg(null);
+        setNewNumero('');
+        setNewNombre('');
+        setNewDescripcion('');
+      }, 1200);
+      return;
+    }
+
+    try {
+      setSaving(true);
+      setErrorMsg(null);
+      setInfoMsg(null);
+
+      const { data, error } = await supabase
+        .from('vlans')
+        .insert([{
+          numero: num,
+          nombre: name,
+          color: newColor || '#2563EB',
+          descripcion: newDescripcion.trim() || null,
+        }])
+        .select()
+        .single();
+
+      if (error) {
+        if (isDuplicateError(error)) {
+          const { data: existingDb } = await supabase
+            .from('vlans')
+            .select()
+            .eq('numero', num)
+            .single();
+
+          if (existingDb) {
+            onVlanCreated?.(existingDb);
+            onChange(existingDb.numero, existingDb.id, existingDb);
+            setInfoMsg(`La VLAN ${num} ya existía en la base de datos, se seleccionó`);
+            setTimeout(() => {
+              setIsOpen(false);
+              setInfoMsg(null);
+              setNewNumero('');
+              setNewNombre('');
+              setNewDescripcion('');
+            }, 1200);
+            return;
+          }
+        }
+        throw error;
+      }
+
+      if (data) {
+        onVlanCreated?.(data);
+        onChange(data.numero, data.id, data);
+        setIsOpen(false);
+        setNewNumero('');
+        setNewNombre('');
+        setNewDescripcion('');
+      }
+    } catch (err) {
+      console.error('Error creating VLAN:', err);
+      setErrorMsg(formatError(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className={`relative ${className}`}>
+      <div className="flex items-center gap-1.5 w-full">
+        {selectedVlan?.color && (
+          <span
+            className="w-3 h-3 rounded-full shrink-0 border border-black/20 shadow-2xs"
+            style={{ backgroundColor: selectedVlan.color }}
+            title={`VLAN ${selectedVlan.numero} (${selectedVlan.color})`}
+          />
+        )}
+        <select
+          value={selectValue}
+          onChange={handleSelectChange}
+          disabled={disabled}
+          required={required}
+          className={`w-full border border-slate-300 rounded bg-white font-mono focus:ring-1 focus:ring-blue-600 focus:outline-none transition-colors ${
+            compact ? 'px-2 py-1 text-[11px]' : 'px-2.5 py-1.5 text-xs'
+          } ${disabled ? 'bg-slate-50 text-slate-400 cursor-not-allowed' : 'text-slate-800 font-semibold'}`}
+        >
+          {allowNone && (
+            <option value="">{noneLabel}</option>
+          )}
+          {!allowNone && !selectValue && (
+            <option value="" disabled>{placeholder}</option>
+          )}
+          {vlans.map((v) => (
+            <option key={v.id} value={v.id}>
+              VLAN {v.numero} - {v.nombre}
+            </option>
+          ))}
+          <option value="__NEW__" className="text-blue-600 font-bold bg-blue-50">
+            + Agregar nueva VLAN...
+          </option>
+        </select>
+      </div>
+
+      {/* Inline Quick Add VLAN Popover */}
+      {isOpen && (
+        <div 
+          className="absolute z-50 left-0 right-0 sm:right-auto sm:w-80 top-full mt-1.5 bg-white border-2 border-blue-500 rounded-lg shadow-xl p-3 space-y-2.5 text-xs font-sans text-slate-800 animate-in fade-in zoom-in-95 duration-150"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between border-b border-slate-200 pb-1.5">
+            <span className="font-bold text-blue-900 flex items-center gap-1.5 text-[11px] font-mono uppercase">
+              <Layers className="w-3.5 h-3.5 text-blue-600" />
+              <span>Nueva VLAN en Catálogo</span>
+            </span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsOpen(false);
+                setErrorMsg(null);
+                setInfoMsg(null);
+              }}
+              className="text-slate-400 hover:text-slate-600 text-xs p-0.5"
+            >
+              ✕
+            </button>
+          </div>
+
+          {errorMsg && (
+            <div className="p-2 bg-rose-50 border border-rose-200 rounded text-[11px] text-rose-700 flex items-start gap-1.5">
+              <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0 mt-0.5" />
+              <span>{errorMsg}</span>
+            </div>
+          )}
+
+          {infoMsg && (
+            <div className="p-2 bg-blue-50 border border-blue-200 rounded text-[11px] text-blue-700 flex items-center gap-1.5">
+              <Info className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+              <span>{infoMsg}</span>
+            </div>
+          )}
+
+          <div className="grid grid-cols-3 gap-2">
+            <div>
+              <label className="block text-[10px] font-semibold text-slate-700 mb-0.5 font-mono uppercase">
+                ID VLAN *
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={4094}
+                value={newNumero}
+                onChange={(e) => setNewNumero(e.target.value)}
+                placeholder="10"
+                className="w-full px-2 py-1 border border-slate-300 rounded bg-white text-xs font-mono font-bold focus:ring-1 focus:ring-blue-600"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    handleCreate(e);
+                  }
+                }}
+              />
+            </div>
+            <div className="col-span-2">
+              <label className="block text-[10px] font-semibold text-slate-700 mb-0.5 font-mono uppercase">
+                Nombre de Red *
+              </label>
+              <input
+                type="text"
+                value={newNombre}
+                onChange={(e) => setNewNombre(e.target.value)}
+                placeholder="ej. CCTV Seguridad"
+                className="w-full px-2 py-1 border border-slate-300 rounded bg-white text-xs focus:ring-1 focus:ring-blue-600"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    handleCreate(e);
+                  }
+                }}
+              />
+            </div>
+          </div>
+
+          {/* Color Selector */}
+          <div>
+            <label className="block text-[10px] font-semibold text-slate-700 mb-1 font-mono uppercase flex items-center justify-between">
+              <span className="flex items-center gap-1">
+                <Palette className="w-3 h-3 text-slate-500" />
+                <span>Color Distintivo</span>
+              </span>
+              <span className="text-[10px] font-mono text-slate-500">{newColor}</span>
+            </label>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {PRESET_VLAN_COLORS.map(c => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => setNewColor(c)}
+                  className={`w-5 h-5 rounded-full border transition-transform cursor-pointer ${
+                    newColor.toLowerCase() === c.toLowerCase()
+                      ? 'scale-125 border-slate-900 ring-2 ring-blue-500/40'
+                      : 'border-black/20 hover:scale-110'
+                  }`}
+                  style={{ backgroundColor: c }}
+                  title={c}
+                />
+              ))}
+              <input
+                type="color"
+                value={newColor}
+                onChange={(e) => setNewColor(e.target.value)}
+                title="Color personalizado"
+                className="w-5 h-5 p-0 border border-slate-300 rounded cursor-pointer ml-1"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-[10px] font-semibold text-slate-700 mb-0.5 font-mono uppercase">
+              Descripción (Opcional)
+            </label>
+            <input
+              type="text"
+              value={newDescripcion}
+              onChange={(e) => setNewDescripcion(e.target.value)}
+              placeholder="ej. Cámaras y servidores CCTV"
+              className="w-full px-2 py-1 border border-slate-300 rounded bg-white text-xs"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleCreate(e);
+                }
+              }}
+            />
+          </div>
+
+          <div className="flex justify-end gap-2 pt-1 border-t border-slate-200">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsOpen(false);
+                setErrorMsg(null);
+                setInfoMsg(null);
+              }}
+              className="px-2.5 py-1 text-slate-600 hover:bg-slate-100 rounded text-xs"
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              disabled={saving || !newNumero.trim() || !newNombre.trim()}
+              onClick={(e) => handleCreate(e)}
+              className="inline-flex items-center gap-1 px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded font-semibold text-xs disabled:opacity-50 cursor-pointer shadow-xs"
             >
               {saving ? 'Guardando...' : 'Guardar y Seleccionar'}
             </button>

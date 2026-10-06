@@ -12,14 +12,28 @@ import { UnassignedItems } from './components/UnassignedItems';
 import { CatalogsView } from './components/CatalogsView';
 import { WarehouseView } from './components/WarehouseView';
 import { ReportsView } from './components/ReportsView';
+import { NetworkPointsList } from './components/NetworkPointsList';
+import { NetworkPointDetail } from './components/NetworkPointDetail';
+import { NetworkPointForm } from './components/NetworkPointForm';
 import { supabase } from './lib/supabase';
-import { Rack, Camara, Equipo } from './types/database';
+import { Rack, Camara, Equipo, PuntoRed } from './types/database';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<NavView>('explorador');
   const [selectedRack, setSelectedRack] = useState<Rack | null>(null);
   const [selectedCamera, setSelectedCamera] = useState<Camara | null>(null);
+  const [selectedPoint, setSelectedPoint] = useState<PuntoRed | null>(null);
+  const [pointToEdit, setPointToEdit] = useState<PuntoRed | null>(null);
   const [selectedEquipmentId, setSelectedEquipmentId] = useState<string | undefined>(undefined);
+  const [maintenanceTarget, setMaintenanceTarget] = useState<{
+    entityType: 'camara' | 'equipo' | 'rack' | 'punto_red';
+    entityId: string;
+    camera?: Camara;
+    equipo?: Equipo;
+    rack?: Rack;
+    puntoRed?: PuntoRed;
+    backView: NavView;
+  } | null>(null);
   const [loadingInitial, setLoadingInitial] = useState(true);
   const [unassignedCount, setUnassignedCount] = useState<number>(0);
   const [warehouseCount, setWarehouseCount] = useState<number>(0);
@@ -106,8 +120,47 @@ export default function App() {
     setCurrentView('camara');
   };
 
-  const handleNavigateToMaintenance = (cam: Camara) => {
-    setSelectedCamera(cam);
+  const handleNavigateToMaintenance = (
+    target: Camara | Rack | Equipo | PuntoRed,
+    type: 'camara' | 'equipo' | 'rack' | 'punto_red' = 'camara',
+    backView: NavView = 'camara'
+  ) => {
+    if (type === 'rack') {
+      const rk = target as Rack;
+      setSelectedRack(rk);
+      setMaintenanceTarget({
+        entityType: 'rack',
+        entityId: rk.id,
+        rack: rk,
+        backView
+      });
+    } else if (type === 'equipo') {
+      const eq = target as Equipo;
+      setMaintenanceTarget({
+        entityType: 'equipo',
+        entityId: eq.id,
+        equipo: eq,
+        backView
+      });
+    } else if (type === 'punto_red') {
+      const pt = target as PuntoRed;
+      setSelectedPoint(pt);
+      setMaintenanceTarget({
+        entityType: 'punto_red',
+        entityId: pt.id,
+        puntoRed: pt,
+        backView
+      });
+    } else {
+      const cam = target as Camara;
+      setSelectedCamera(cam);
+      setMaintenanceTarget({
+        entityType: 'camara',
+        entityId: cam.id,
+        camera: cam,
+        backView
+      });
+    }
     setCurrentView('mantenimiento');
   };
 
@@ -158,6 +211,7 @@ export default function App() {
             onSelectCamera={handleSelectCamera}
             onNavigateToElevation={handleNavigateToElevation}
             onNavigateToPorts={handleNavigateToPorts}
+            onNavigateToMaintenanceRack={(r) => handleNavigateToMaintenance(r, 'rack', 'explorador')}
             selectedRackId={selectedRack?.id}
           />
         )}
@@ -175,6 +229,7 @@ export default function App() {
               onSelectCamera={handleSelectCamera}
               onNavigateToElevation={handleNavigateToElevation}
               onNavigateToPorts={handleNavigateToPorts}
+              onNavigateToMaintenanceRack={(r) => handleNavigateToMaintenance(r, 'rack', 'elevacion')}
             />
           )
         )}
@@ -231,11 +286,94 @@ export default function App() {
           />
         )}
 
+        {currentView === 'puntos_red' && (
+          <NetworkPointsList
+            onSelectPoint={(point) => {
+              setSelectedPoint(point);
+              setCurrentView('punto_red_detalle');
+            }}
+            onNavigateToRegistration={() => {
+              setPointToEdit(null);
+              setCurrentView('punto_red_registro');
+            }}
+            onNavigateToEdit={(point) => {
+              setPointToEdit(point);
+              setCurrentView('punto_red_registro');
+            }}
+            onNavigateToRack={handleNavigateToRackById}
+          />
+        )}
+
+        {currentView === 'punto_red_registro' && (
+          <NetworkPointForm
+            initialPoint={pointToEdit}
+            onSuccess={async (newPointId) => {
+              if (newPointId) {
+                const { data } = await supabase
+                  .from('puntos_red')
+                  .select('*, marca_rel:marcas(*), modelo_rel:modelos(*)')
+                  .eq('id', newPointId)
+                  .single();
+                if (data) setSelectedPoint(data);
+                setCurrentView('punto_red_detalle');
+              } else {
+                setCurrentView('puntos_red');
+              }
+            }}
+            onCancel={() => setCurrentView('puntos_red')}
+          />
+        )}
+
+        {currentView === 'punto_red_detalle' && (
+          selectedPoint ? (
+            <NetworkPointDetail
+              point={selectedPoint}
+              onBack={() => setCurrentView('puntos_red')}
+              onNavigateToEdit={(pt) => {
+                setPointToEdit(pt);
+                setCurrentView('punto_red_registro');
+              }}
+              onNavigateToRack={handleNavigateToRackById}
+              onPointUpdated={(updated) => setSelectedPoint(updated)}
+              onPointDeleted={() => {
+                setSelectedPoint(null);
+                setCurrentView('puntos_red');
+              }}
+            />
+          ) : (
+            <NetworkPointsList
+              onSelectPoint={(point) => {
+                setSelectedPoint(point);
+                setCurrentView('punto_red_detalle');
+              }}
+              onNavigateToRegistration={() => {
+                setPointToEdit(null);
+                setCurrentView('punto_red_registro');
+              }}
+              onNavigateToEdit={(point) => {
+                setPointToEdit(point);
+                setCurrentView('punto_red_registro');
+              }}
+              onNavigateToRack={handleNavigateToRackById}
+            />
+          )
+        )}
+
         {currentView === 'mantenimiento' && (
           <MaintenanceHistory
-            entityType="camara"
-            camera={selectedCamera || undefined}
-            onBack={() => setCurrentView('camara')}
+            entityType={maintenanceTarget?.entityType || 'camara'}
+            entityId={maintenanceTarget?.entityId}
+            camera={maintenanceTarget?.camera || selectedCamera || undefined}
+            equipo={maintenanceTarget?.equipo}
+            rack={maintenanceTarget?.rack || selectedRack || undefined}
+            puntoRed={maintenanceTarget?.puntoRed || selectedPoint || undefined}
+            onBack={() => {
+              if (maintenanceTarget?.backView) {
+                setCurrentView(maintenanceTarget.backView);
+              } else {
+                setCurrentView('camara');
+              }
+            }}
           />
         )}
 

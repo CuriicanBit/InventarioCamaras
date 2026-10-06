@@ -22,7 +22,7 @@ import {
   Link2
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Sede, Campus, Edificio, Piso, Rack, Equipo, Proveedor, Marca, Modelo, Camara } from '../types/database';
+import { Sede, Campus, Edificio, Piso, Rack, Equipo, Proveedor, Marca, Modelo, Camara, PuertoSwitchOcupacion } from '../types/database';
 import { MarcaSelect, ModeloSelect, ProveedorSelect } from './catalogs/CatalogSelectors';
 import { NodeFormModal } from './TreeNodeModals';
 import { NodeLevel } from '../utils/treeHierarchy';
@@ -45,6 +45,8 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
   const [allEquipos, setAllEquipos] = useState<Equipo[]>([]);
   const [patchPanels, setPatchPanels] = useState<Equipo[]>([]);
   const [switches, setSwitches] = useState<Equipo[]>([]);
+  const [switchPorts, setSwitchPorts] = useState<PuertoSwitchOcupacion[]>([]);
+  const [loadingSwitchPorts, setLoadingSwitchPorts] = useState(false);
   const [nvrs, setNvrs] = useState<Equipo[]>([]);
   const [proveedores, setProveedores] = useState<Proveedor[]>([]);
   const [existingCamaras, setExistingCamaras] = useState<Camara[]>([]);
@@ -79,9 +81,10 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
   const [selectedNvrId, setSelectedNvrId] = useState<string>('');
 
   // Port and routing values
-  const [puertoPatch, setPuertoPatch] = useState<number>(8);
-  const [puertoSwitch, setPuertoSwitch] = useState<string>('Fa0/8');
-  const [canalNvr, setCanalNvr] = useState<number>(8);
+  const [puertoPatch, setPuertoPatch] = useState<number | ''>(1);
+  const [puertoSwitch, setPuertoSwitch] = useState<string>('');
+  const [canalNvr, setCanalNvr] = useState<number | ''>(1);
+  const [occupiedPpPorts, setOccupiedPpPorts] = useState<{ [port: number]: string }>({});
 
   // Form registration mode: camera vs rack equipment
   const [tipoRegistro, setTipoRegistro] = useState<'camara' | 'equipo'>('camara');
@@ -373,6 +376,98 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
     setSelectedNvrId(nvrList[0]?.id || '');
   };
 
+  // Load switch ports from v_puertos_switch_ocupacion (ONLY RJ45, EXCLUDE SFP)
+  useEffect(() => {
+    if (!selectedSwitchId) {
+      setSwitchPorts([]);
+      setPuertoSwitch('');
+      return;
+    }
+
+    const loadPorts = async () => {
+      try {
+        setLoadingSwitchPorts(true);
+        const { data, error } = await supabase
+          .from('v_puertos_switch_ocupacion')
+          .select('*')
+          .eq('switch_id', selectedSwitchId)
+          .order('numero_puerto');
+
+        if (error) throw error;
+
+        // Exclude SFP ports - cameras only connect to RJ45 access ports
+        const rj45Only = (data || []).filter(p => p.tipo_puerto !== 'sfp');
+        setSwitchPorts(rj45Only);
+
+        // Auto-select first available RJ45 port if none selected or current is occupied
+        if (rj45Only.length > 0) {
+          const firstFree = rj45Only.find(p => !p.ocupado_por_codigo);
+          if (firstFree) {
+            setPuertoSwitch(String(firstFree.numero_puerto));
+          } else {
+            setPuertoSwitch('');
+          }
+        }
+      } catch (err) {
+        console.error('Error loading switch ports for camera form:', err);
+      } finally {
+        setLoadingSwitchPorts(false);
+      }
+    };
+
+    loadPorts();
+  }, [selectedSwitchId]);
+
+  // Load patch panel ports occupancy when selectedPatchPanelId changes
+  useEffect(() => {
+    if (!selectedPatchPanelId) {
+      setOccupiedPpPorts({});
+      return;
+    }
+    const loadPpOccupancy = async () => {
+      try {
+        const [
+          { data: cams },
+          { data: puntos },
+        ] = await Promise.all([
+          supabase
+            .from('camaras')
+            .select('id, codigo, puerto_patch')
+            .eq('patch_panel_id', selectedPatchPanelId),
+          supabase
+            .from('puntos_red')
+            .select('id, codigo, puerto_patch')
+            .eq('patch_panel_id', selectedPatchPanelId),
+        ]);
+
+        const occMap: { [port: number]: string } = {};
+        (cams || []).forEach(c => {
+          if (c.puerto_patch) occMap[c.puerto_patch] = c.codigo;
+        });
+        (puntos || []).forEach(pt => {
+          if (pt.puerto_patch) occMap[pt.puerto_patch] = pt.codigo;
+        });
+        setOccupiedPpPorts(occMap);
+
+        // Auto-select first free port
+        const ppObj = patchPanels.find(p => p.id === selectedPatchPanelId);
+        const total = ppObj?.puertos_totales || 24;
+        let firstFree: number | null = null;
+        for (let i = 1; i <= total; i++) {
+          if (!occMap[i]) {
+            firstFree = i;
+            break;
+          }
+        }
+        setPuertoPatch(firstFree || 1);
+      } catch (err) {
+        console.error('Error loading patch panel occupancy in camera form:', err);
+      }
+    };
+
+    loadPpOccupancy();
+  }, [selectedPatchPanelId, patchPanels]);
+
   // Click on floor plan to position camera
   const handleFloorPlanClick = (e: React.MouseEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -463,6 +558,25 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
       const finalZoom = isPtz ? (zoomOptico.trim() || null) : null;
       const finalNumSensores = isMultisensor ? (numSensores ? Number(numSensores) : 4) : null;
 
+      // 1. Validar puerto de Patch Panel no ocupado
+      if (selectedPatchPanelId && puertoPatch) {
+        const pNum = Number(puertoPatch);
+        if (occupiedPpPorts[pNum]) {
+          throw new Error(`El puerto ${pNum} del Patch Panel ya está ocupado por "${occupiedPpPorts[pNum]}". Selecciona un puerto libre.`);
+        }
+      }
+
+      // 2. Validar puerto de Switch no ocupado
+      let cleanSwitchPort: string | null = null;
+      if (selectedSwitchId && puertoSwitch) {
+        cleanSwitchPort = String(puertoSwitch).match(/\d+$/)?.[0] || String(puertoSwitch).trim();
+        const pNum = parseInt(cleanSwitchPort, 10);
+        const occ = switchPorts.find(p => p.numero_puerto === pNum);
+        if (occ?.ocupado_por_codigo) {
+          throw new Error(`El puerto ${cleanSwitchPort} del Switch ya está ocupado por "${occ.ocupado_por_codigo}". Selecciona un puerto libre.`);
+        }
+      }
+
       // Insert into camaras table
       const payload: any = {
         piso_id: selectedPisoId,
@@ -488,7 +602,7 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
         patch_panel_id: selectedPatchPanelId || null,
         puerto_patch: puertoPatch ? Number(puertoPatch) : null,
         switch_id: selectedSwitchId || null,
-        puerto_switch: puertoSwitch || null,
+        puerto_switch: cleanSwitchPort,
         nvr_id: selectedNvrId || null,
         canal_nvr: canalNvr ? Number(canalNvr) : null,
         posicion_x: posicionX,
@@ -530,8 +644,8 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
         const match = codigo.match(/(\d+)$/);
         const nextNum = match ? parseInt(match[1]) + 1 : 26;
         setCodigo(`CAM-ENG-P2-${nextNum}`);
-        setPuertoPatch(prev => Math.min(prev + 1, 24));
-        setCanalNvr(prev => Math.min(prev + 1, 32));
+        setPuertoPatch(prev => Math.min((Number(prev) || 1) + 1, 24));
+        setCanalNvr(prev => Math.min((Number(prev) || 1) + 1, 32));
         setDireccionIp(prev => {
           const parts = prev.split('.');
           if (parts.length === 4) {
@@ -914,13 +1028,21 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
               <label className="block text-[11px] text-slate-600 mb-1">Puerto Patch Panel</label>
               <select
                 value={puertoPatch}
-                onChange={(e) => setPuertoPatch(parseInt(e.target.value) || 1)}
-                disabled={patchPanels.length === 0}
-                className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white focus:ring-1 focus:ring-blue-600 text-xs disabled:bg-slate-50 disabled:text-slate-400"
+                onChange={(e) => setPuertoPatch(e.target.value ? parseInt(e.target.value, 10) : ('' as any))}
+                disabled={patchPanels.length === 0 || !selectedPatchPanelId}
+                className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white focus:ring-1 focus:ring-blue-600 text-xs disabled:bg-slate-50 disabled:text-slate-400 font-mono"
               >
-                {Array.from({ length: 24 }, (_, i) => i + 1).map(n => (
-                  <option key={n} value={n}>Puerto {String(n).padStart(2, '0')} (Asignado en Terreno)</option>
-                ))}
+                {Array.from({
+                  length: (patchPanels.find(p => p.id === selectedPatchPanelId)?.puertos_totales || 24)
+                }, (_, i) => i + 1).map(n => {
+                  const occupiedBy = occupiedPpPorts[n];
+                  const isOccupied = Boolean(occupiedBy);
+                  return (
+                    <option key={n} value={n} disabled={isOccupied} className={isOccupied ? 'text-slate-400 bg-slate-50' : 'text-slate-900 font-bold'}>
+                      Puerto {String(n).padStart(2, '0')} {isOccupied ? `· ✗ Ocupado (${occupiedBy})` : '· ✓ Libre'}
+                    </option>
+                  );
+                })}
               </select>
             </div>
           </div>
@@ -948,13 +1070,43 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
                     </>
                   )}
                 </select>
-                <input
-                  type="text"
-                  value={puertoSwitch}
-                  onChange={(e) => setPuertoSwitch(e.target.value)}
-                  placeholder="Fa0/8"
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded focus:ring-1 focus:ring-blue-600 text-xs"
-                />
+                {switchPorts.length > 0 ? (
+                  <select
+                    value={puertoSwitch ? (String(puertoSwitch).match(/\d+$/)?.[0] || String(puertoSwitch)) : ''}
+                    onChange={(e) => setPuertoSwitch(e.target.value)}
+                    className="w-full px-2 py-1.5 border border-slate-300 rounded focus:ring-1 focus:ring-blue-600 text-xs bg-white font-mono font-semibold truncate"
+                  >
+                    <option value="">Seleccione puerto RJ45...</option>
+                    {switchPorts.map(p => {
+                      const isOccupied = Boolean(p.ocupado_por_codigo);
+                      const portValue = String(p.numero_puerto);
+                      const vNum = p.vlan_numero ?? p.vlan;
+                      let label = `Puerto ${p.numero_puerto} (Fa0/${p.numero_puerto})`;
+                      if (vNum) label += ` [VLAN ${vNum}]`;
+                      if (isOccupied) label += ` · ✗ Ocupado (${p.ocupado_por_codigo})`;
+                      else label += ` · ✓ Libre`;
+
+                      return (
+                        <option 
+                          key={p.puerto_switch_id} 
+                          value={portValue}
+                          disabled={isOccupied}
+                          className={isOccupied ? 'text-slate-400 bg-slate-50' : 'text-slate-900 font-bold'}
+                        >
+                          {label}
+                        </option>
+                      );
+                    })}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={puertoSwitch}
+                    onChange={(e) => setPuertoSwitch(e.target.value)}
+                    placeholder="Fa0/8"
+                    className="w-full px-3 py-1.5 border border-slate-300 rounded focus:ring-1 focus:ring-blue-600 text-xs font-mono"
+                  />
+                )}
               </div>
             </div>
 
@@ -985,9 +1137,16 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
                   min="1"
                   max="64"
                   value={canalNvr}
-                  onChange={(e) => setCanalNvr(parseInt(e.target.value) || 1)}
-                  placeholder="Canal 08"
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded focus:ring-1 focus:ring-blue-600 text-xs"
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === '') setCanalNvr('' as any);
+                    else {
+                      const n = parseInt(val, 10);
+                      if (!isNaN(n)) setCanalNvr(n);
+                    }
+                  }}
+                  placeholder="1"
+                  className="w-full px-3 py-1.5 border border-slate-300 rounded focus:ring-1 focus:ring-blue-600 text-xs font-mono"
                 />
               </div>
             </div>
@@ -1209,8 +1368,16 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
                       min="30"
                       max="140"
                       value={aperturaFov}
-                      onChange={(e) => setAperturaFov(parseInt(e.target.value) || 103)}
-                      className="w-20 px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === '') setAperturaFov('' as any);
+                        else {
+                          const n = parseInt(val, 10);
+                          if (!isNaN(n)) setAperturaFov(n);
+                        }
+                      }}
+                      placeholder="103"
+                      className="w-20 px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs font-mono"
                     />
                     <span className="text-slate-500 text-xs">grados (°)</span>
                   </div>
@@ -1222,9 +1389,17 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
                       type="number"
                       min="0"
                       max="360"
-                      value={azimut ?? 0}
-                      onChange={(e) => setAzimut(parseInt(e.target.value) || 0)}
-                      className="w-20 px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
+                      value={azimut ?? ''}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === '') setAzimut('' as any);
+                        else {
+                          const n = parseInt(val, 10);
+                          if (!isNaN(n)) setAzimut(n);
+                        }
+                      }}
+                      placeholder="90"
+                      className="w-20 px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs font-mono"
                     />
                     <span className="text-slate-500 text-xs">0° N - 360°</span>
                   </div>
@@ -1285,9 +1460,17 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
                           type="number"
                           min="0"
                           max="360"
-                          value={azimut ?? 90}
-                          onChange={(e) => setAzimut(parseInt(e.target.value) || 0)}
-                          className="w-24 px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
+                          value={azimut ?? ''}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (val === '') setAzimut('' as any);
+                            else {
+                              const n = parseInt(val, 10);
+                              if (!isNaN(n)) setAzimut(n);
+                            }
+                          }}
+                          placeholder="90"
+                          className="w-24 px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs font-mono"
                         />
                         <span className="text-slate-500 text-xs">0° N - 360°</span>
                       </div>
@@ -1320,8 +1503,16 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
                       min="90"
                       max="360"
                       value={aperturaFov}
-                      onChange={(e) => setAperturaFov(parseInt(e.target.value) || 180)}
-                      className="w-20 px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === '') setAperturaFov('' as any);
+                        else {
+                          const n = parseInt(val, 10);
+                          if (!isNaN(n)) setAperturaFov(n);
+                        }
+                      }}
+                      placeholder="180"
+                      className="w-20 px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs font-mono"
                     />
                     <span className="text-slate-500 text-xs">grados (ej. 180° o 360°)</span>
                   </div>
@@ -1333,9 +1524,17 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
                       type="number"
                       min="0"
                       max="360"
-                      value={azimut ?? 0}
-                      onChange={(e) => setAzimut(parseInt(e.target.value) || 0)}
-                      className="w-20 px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
+                      value={azimut ?? ''}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === '') setAzimut('' as any);
+                        else {
+                          const n = parseInt(val, 10);
+                          if (!isNaN(n)) setAzimut(n);
+                        }
+                      }}
+                      placeholder="90"
+                      className="w-20 px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs font-mono"
                     />
                     <span className="text-slate-500 text-xs">0° N - 360°</span>
                   </div>
