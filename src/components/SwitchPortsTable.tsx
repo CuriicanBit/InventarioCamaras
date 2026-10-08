@@ -19,11 +19,42 @@ import {
   ArrowRightLeft,
   Link2,
   AlertTriangle,
-  Radio
+  Radio,
+  Briefcase,
+  GraduationCap,
+  Wifi,
+  ChevronDown,
+  Unlink,
+  ShieldCheck,
+  Loader2
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Equipo, PuertoSwitchOcupacion, Vlan, EnlaceSwitch } from '../types/database';
+import { Equipo, PuertoSwitchOcupacion, Vlan, EnlaceSwitch, formatRolRed } from '../types/database';
 import { VlanSelect } from './catalogs/CatalogSelectors';
+import { ConfigurarEnlaceTroncalDialog } from './ConfigurarEnlaceTroncalDialog';
+
+export type PortPhysicalStatus = 'ocupado' | 'configurado' | 'libre';
+
+export function getPortPhysicalStatus(port: {
+  ocupado_por_tipo?: string | null;
+  ocupado_por_codigo?: string | null;
+  vlan_numero?: number | null;
+  vlan?: number | null;
+  uso?: string | null;
+}): PortPhysicalStatus {
+  // 1. Ocupado: tiene una cámara o un punto_red físicamente conectado (ocupado_por_tipo u ocupado_por_codigo)
+  if (port.ocupado_por_tipo || port.ocupado_por_codigo) {
+    return 'ocupado';
+  }
+  // 2. Configurado/Reservado: tiene VLAN y/o Uso asignado, pero SIN cámara ni punto_red conectado todavía
+  const hasVlan = Boolean(port.vlan_numero || port.vlan);
+  const hasUso = Boolean(port.uso && port.uso.trim() !== '' && port.uso.trim().toLowerCase() !== 'libre');
+  if (hasVlan || hasUso) {
+    return 'configurado';
+  }
+  // 3. Libre: sin VLAN y sin dispositivo conectado (y sin uso asignado)
+  return 'libre';
+}
 
 interface SwitchPortsTableProps {
   switchEquipo: Equipo;
@@ -83,9 +114,25 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
     targetPorts: PuertoSwitchOcupacion[];
   } | null>(null);
 
+  // SFP accordion collapsed by default
+  const [isSfpExpanded, setIsSfpExpanded] = useState<boolean>(false);
+
+  // Modal para configurar nuevo enlace troncal SFP
+  const [selectedSfpForTrunk, setSelectedSfpForTrunk] = useState<PuertoSwitchOcupacion | null>(null);
+
+  // Modal de confirmación para desconectar enlace troncal
+  const [disconnectConfirmEnlace, setDisconnectConfirmEnlace] = useState<{
+    enlaceId: string;
+    remoteSwitchCodigo: string;
+    remotePortNum: number | string;
+    localPortNum: number;
+    esPrincipal: boolean;
+  } | null>(null);
+  const [disconnecting, setDisconnecting] = useState<boolean>(false);
+
   // Quick search / filter
   const [searchFilter, setSearchFilter] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'libres' | 'ocupados' | 'sin_vlan'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'libres' | 'configurados' | 'ocupados' | 'sin_vlan'>('all');
 
   const showToast = (msg: string) => {
     setSuccessToast(msg);
@@ -108,7 +155,7 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
         .order('numero', { ascending: true });
       setVlans(vlansData || []);
 
-      // Load trunk enlaces for this switch
+      // Load trunk enlaces for this switch (both as origin and destination)
       const { data: enlacesData } = await supabase
         .from('enlaces_switch')
         .select(`
@@ -117,9 +164,10 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
           puerto_destino_id,
           switch_origen_id,
           switch_destino_id,
+          es_principal,
           created_at,
-          switch_origen:equipos!enlaces_switch_switch_origen_id_fkey(id, codigo, modelo),
-          switch_destino:equipos!enlaces_switch_switch_destino_id_fkey(id, codigo, modelo),
+          switch_origen:equipos!enlaces_switch_switch_origen_id_fkey(id, codigo, modelo, rol_red, rack_id, rack:racks(id, codigo, ubicacion_especifica)),
+          switch_destino:equipos!enlaces_switch_switch_destino_id_fkey(id, codigo, modelo, rol_red, rack_id, rack:racks(id, codigo, ubicacion_especifica)),
           puerto_origen:puertos_switch!enlaces_switch_puerto_origen_id_fkey(id, numero_puerto, tipo_puerto),
           puerto_destino:puertos_switch!enlaces_switch_puerto_destino_id_fkey(id, numero_puerto, tipo_puerto)
         `)
@@ -469,8 +517,35 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
       enlaceId: enlace.id,
       remoteSwitchCodigo: remoteSwitch?.codigo || 'Switch Remoto',
       remoteSwitchModelo: remoteSwitch?.modelo || '',
+      remoteSwitchRol: (remoteSwitch as any)?.rol_red || null,
       remotePuertoNumero: remotePort?.numero_puerto || '?',
+      esPrincipal: Boolean(enlace.es_principal),
+      isOrigin,
     };
+  };
+
+  // Disconnect trunk enlace
+  const handleDisconnectEnlace = async () => {
+    if (!disconnectConfirmEnlace) return;
+    try {
+      setDisconnecting(true);
+      const { error } = await supabase
+        .from('enlaces_switch')
+        .delete()
+        .eq('id', disconnectConfirmEnlace.enlaceId);
+
+      if (error) throw error;
+
+      showToast(`Enlace troncal con ${disconnectConfirmEnlace.remoteSwitchCodigo} desconectado correctamente`);
+      setDisconnectConfirmEnlace(null);
+      await loadPorts();
+      onPortsUpdated?.();
+    } catch (err: any) {
+      console.error('Error disconnecting trunk link:', err);
+      alert('Error al desconectar enlace: ' + (err.message || String(err)));
+    } finally {
+      setDisconnecting(false);
+    }
   };
 
   // Filtered ports for display
@@ -497,9 +572,11 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
         }
       }
 
-      // Status
-      if (statusFilter === 'libres' && p.ocupado_por_codigo) return false;
-      if (statusFilter === 'ocupados' && !p.ocupado_por_codigo) return false;
+      // Status filtering using strict physical criteria
+      const st = getPortPhysicalStatus(p);
+      if (statusFilter === 'libres' && st !== 'libre') return false;
+      if (statusFilter === 'configurados' && st !== 'configurado') return false;
+      if (statusFilter === 'ocupados' && st !== 'ocupado') return false;
       if (statusFilter === 'sin_vlan' && (p.vlan_numero || p.vlan)) return false;
 
       return true;
@@ -514,6 +591,111 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
   const sfpPorts = useMemo(() => {
     return filteredPorts.filter(p => p.tipo_puerto === 'sfp');
   }, [filteredPorts]);
+
+  // Overall RJ45 metrics for this switch (unaffected by search filter)
+  const rj45All = useMemo(() => ports.filter(p => p.tipo_puerto !== 'sfp'), [ports]);
+  const rj45OccupiedCount = useMemo(() => rj45All.filter(p => getPortPhysicalStatus(p) === 'ocupado').length, [rj45All]);
+  const rj45ConfiguredCount = useMemo(() => rj45All.filter(p => getPortPhysicalStatus(p) === 'configurado').length, [rj45All]);
+  const rj45FreeCount = useMemo(() => rj45All.filter(p => getPortPhysicalStatus(p) === 'libre').length, [rj45All]);
+  const rj45OccupancyPct = rj45All.length > 0 ? Math.round((rj45OccupiedCount / rj45All.length) * 100) : 0;
+
+  // Visual badge renderer for the three states
+  const renderStatusBadge = (status: PortPhysicalStatus) => {
+    switch (status) {
+      case 'ocupado':
+        return (
+          <span 
+            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-900 border border-blue-300 shadow-2xs"
+            title="Ocupado físicamente: Cámara o punto de red conectado"
+          >
+            <span className="w-2 h-2 rounded-full bg-blue-600 shrink-0 animate-pulse" />
+            <span>Ocupado</span>
+          </span>
+        );
+      case 'configurado':
+        return (
+          <span 
+            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 shadow-2xs"
+            title="Configurado/Reservado: Con VLAN y/o Uso asignado, pero sin dispositivo conectado aún"
+          >
+            <span className="w-2 h-2 rounded-full bg-amber-500 shrink-0" />
+            <span>Configurado</span>
+          </span>
+        );
+      case 'libre':
+      default:
+        return (
+          <span 
+            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-50 text-emerald-800 border border-emerald-300 shadow-2xs"
+            title="Libre: Sin VLAN ni dispositivo conectado"
+          >
+            <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+            <span>Libre</span>
+          </span>
+        );
+    }
+  };
+
+  // Connected device item renderer
+  const renderConnectedDevice = (port: PuertoSwitchOcupacion, status: PortPhysicalStatus) => {
+    if (status === 'ocupado') {
+      const isCamara = port.ocupado_por_tipo === 'camara';
+      const code = port.ocupado_por_codigo || '';
+      const uso = port.uso || '';
+      
+      let IconComp = Camera;
+      let iconColor = 'text-blue-600';
+      let typeLabel = 'CCTV';
+
+      if (!isCamara) {
+        if (uso.includes('Alumno') || code.includes('SALA') || code.includes('ALUM')) {
+          IconComp = GraduationCap;
+          iconColor = 'text-emerald-600';
+          typeLabel = 'Alumno';
+        } else if (uso.includes('WiFi') || uso.includes('AP') || code.includes('WIFI') || code.includes('AP')) {
+          IconComp = Wifi;
+          iconColor = 'text-indigo-600';
+          typeLabel = 'WiFi AP';
+        } else if (uso.includes('Funcionario') || code.includes('FUNC')) {
+          IconComp = Briefcase;
+          iconColor = 'text-cyan-600';
+          typeLabel = 'Funcionario';
+        } else {
+          IconComp = Network;
+          iconColor = 'text-indigo-600';
+          typeLabel = 'Red';
+        }
+      }
+
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-100 text-slate-800 border border-slate-200">
+          <IconComp className={`w-3.5 h-3.5 ${iconColor} shrink-0`} />
+          <span className="truncate max-w-[140px]" title={code}>
+            {code}
+          </span>
+          <span className="text-[9px] text-slate-500 font-normal">
+            ({typeLabel})
+          </span>
+        </span>
+      );
+    }
+
+    if (status === 'configurado') {
+      return (
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-amber-800 bg-amber-50 border border-amber-200/80 font-mono" title="Puerto configurado/reservado sin dispositivo conectado aún">
+          <AlertCircle className="w-3 h-3 text-amber-500 shrink-0" />
+          <span>Sin dispositivo</span>
+        </span>
+      );
+    }
+
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] text-slate-400 italic font-sans">
+        <CheckCircle2 className="w-3 h-3 text-slate-300 shrink-0" />
+        <span>Disponible</span>
+      </span>
+    );
+  };
 
   // Color helper for Uso
   const getUsoBadgeStyle = (uso: string | null) => {
@@ -578,6 +760,27 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
               })}
             </div>
           )}
+
+          {/* Indicadores claros de los tres estados: Libre, Configurado, Ocupado */}
+          <div className="flex flex-wrap items-center gap-2 mt-2 pt-2 border-t border-slate-100 text-[11px]">
+            <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-slate-100 border border-slate-200">
+              <span className="text-slate-500 font-sans text-[10px] uppercase font-bold">Total RJ45:</span>
+              <span className="font-bold text-slate-800 font-mono">{rj45All.length}</span>
+            </div>
+            <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-900 font-bold" title="Puertos con una cámara o un punto de red físicamente conectado">
+              <span className="w-2 h-2 rounded-full bg-blue-600 animate-pulse" />
+              <span>Ocupados Físicamente: {rj45OccupiedCount}</span>
+              <span className="font-normal text-[10px] text-blue-700 font-mono">({rj45OccupancyPct}%)</span>
+            </div>
+            <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-900 font-bold" title="Puertos configurados/reservados con VLAN o Uso pero sin cámara ni punto de red conectado todavía">
+              <span className="w-2 h-2 rounded-full bg-amber-500" />
+              <span>Configurados Sin Conectar: {rj45ConfiguredCount}</span>
+            </div>
+            <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-900 font-bold" title="Puertos totalmente libres sin VLAN ni dispositivo conectado">
+              <span className="w-2 h-2 rounded-full bg-emerald-500" />
+              <span>Libres: {rj45FreeCount}</span>
+            </div>
+          </div>
         </div>
 
         {/* Action Buttons */}
@@ -944,8 +1147,9 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
             className="px-2 py-1 border border-slate-200 rounded bg-slate-50 text-[11px] focus:bg-white focus:outline-none font-mono"
           >
             <option value="all">Ver: Todos ({ports.length})</option>
-            <option value="libres">Solo Libres ({ports.filter(p => !p.ocupado_por_codigo).length})</option>
-            <option value="ocupados">Solo Ocupados ({ports.filter(p => p.ocupado_por_codigo).length})</option>
+            <option value="ocupados">Solo Ocupados Físicamente ({ports.filter(p => getPortPhysicalStatus(p) === 'ocupado').length})</option>
+            <option value="configurados">Solo Configurados Sin Conectar ({ports.filter(p => getPortPhysicalStatus(p) === 'configurado').length})</option>
+            <option value="libres">Solo Libres ({ports.filter(p => getPortPhysicalStatus(p) === 'libre').length})</option>
             <option value="sin_vlan">Sin VLAN ({ports.filter(p => !p.vlan_numero && !p.vlan).length})</option>
           </select>
         </div>
@@ -975,32 +1179,32 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
               <thead className="bg-slate-100 border-b border-slate-200 text-[10px] text-slate-600 uppercase tracking-wider sticky top-0 z-10">
                 <tr>
                   <th className="py-2.5 px-3 w-16">Puerto</th>
-                  <th className="py-2.5 px-3 w-48">VLAN</th>
+                  <th className="py-2.5 px-3 w-36">Estado Físico</th>
+                  <th className="py-2.5 px-3 w-44">VLAN</th>
                   <th className="py-2.5 px-3 w-36">Uso</th>
                   <th className="py-2.5 px-3">Descripción</th>
-                  <th className="py-2.5 px-3 w-48">Ocupado por</th>
+                  <th className="py-2.5 px-3 w-48">Dispositivo Conectado</th>
                   <th className="py-2.5 px-3 text-right w-20">Acción</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {loading && ports.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-8 text-center text-slate-400">
+                    <td colSpan={7} className="py-8 text-center text-slate-400">
                       <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-1 text-blue-600" />
                       Cargando puertos RJ45...
                     </td>
                   </tr>
                 ) : rj45Ports.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-6 text-center text-slate-400">
+                    <td colSpan={7} className="py-6 text-center text-slate-400">
                       No se encontraron puertos RJ45 con los filtros seleccionados.
                     </td>
                   </tr>
                 ) : (
                   rj45Ports.map((port) => {
                     const isEditingThisRow = editingPortId === port.puerto_switch_id;
-                    const isOccupied = Boolean(port.ocupado_por_codigo);
-                    const isCamara = port.ocupado_por_tipo === 'camara';
+                    const portState = getPortPhysicalStatus(port);
                     const activeVlanVal = port.vlan_numero ?? port.vlan;
 
                     if (isEditingThisRow) {
@@ -1014,6 +1218,11 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
                             <span className="px-1.5 py-0.5 bg-blue-200/80 text-blue-900 rounded font-bold">
                               #{port.numero_puerto}
                             </span>
+                          </td>
+
+                          {/* Estado Físico */}
+                          <td className="py-2 px-3 whitespace-nowrap">
+                            {renderStatusBadge(portState)}
                           </td>
 
                           {/* VLAN (Using VlanSelect from Catalogue!) */}
@@ -1069,23 +1278,9 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
                             />
                           </td>
 
-                          {/* Ocupado por (Read only info) */}
+                          {/* Dispositivo Conectado (Read only info) */}
                           <td className="py-2 px-3 whitespace-nowrap text-[11px]">
-                            {isOccupied ? (
-                              <span className="inline-flex items-center gap-1 font-semibold text-slate-800">
-                                {isCamara ? (
-                                  <Camera className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                                ) : (
-                                  <Network className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-                                )}
-                                <span>{port.ocupado_por_codigo}</span>
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 text-emerald-700 font-semibold text-[10px]">
-                                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                                <span>Libre</span>
-                              </span>
-                            )}
+                            {renderConnectedDevice(port, portState)}
                           </td>
 
                           {/* Acciones de Edición (Confirmar / Cancelar) */}
@@ -1127,6 +1322,11 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
                           <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200 group-hover:bg-blue-50 group-hover:text-blue-700 group-hover:border-blue-200 transition-colors">
                             #{port.numero_puerto}
                           </span>
+                        </td>
+
+                        {/* Estado Físico */}
+                        <td className="py-2.5 px-3 whitespace-nowrap">
+                          {renderStatusBadge(portState)}
                         </td>
 
                         {/* VLAN Badge */}
@@ -1178,28 +1378,9 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
                           )}
                         </td>
 
-                        {/* Ocupado por */}
+                        {/* Dispositivo Conectado */}
                         <td className="py-2.5 px-3 whitespace-nowrap">
-                          {isOccupied ? (
-                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-100 text-slate-800 border border-slate-200">
-                              {isCamara ? (
-                                <Camera className="w-3 h-3 text-blue-600 shrink-0" />
-                              ) : (
-                                <Network className="w-3 h-3 text-indigo-600 shrink-0" />
-                              )}
-                              <span className="truncate max-w-[140px]" title={port.ocupado_por_codigo || ''}>
-                                {port.ocupado_por_codigo}
-                              </span>
-                              <span className="text-[9px] text-slate-500 font-normal">
-                                ({isCamara ? 'CCTV' : 'Red'})
-                              </span>
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                              <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
-                              <span>Libre</span>
-                            </span>
-                          )}
+                          {renderConnectedDevice(port, portState)}
                         </td>
 
                         {/* Acción */}
@@ -1227,19 +1408,31 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
       {/* SECCIÓN 2: PUERTOS SFP (ENLACES TRONCALES) */}
       {/* ========================================== */}
       <div className="space-y-1.5 pt-3 border-t border-slate-200">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-[11px] font-bold text-amber-900 bg-amber-50/70 border border-amber-200 px-3 py-2 rounded-lg">
-          <div className="flex items-center gap-2">
-            <Radio className="w-4 h-4 text-amber-600 shrink-0 animate-pulse" />
+        <button
+          type="button"
+          onClick={() => setIsSfpExpanded(prev => !prev)}
+          className="w-full flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] font-bold text-amber-900 bg-amber-50/80 hover:bg-amber-100/80 border border-amber-200 px-3 py-2.5 rounded-lg transition-colors text-left cursor-pointer group"
+          title={isSfpExpanded ? "Clic para contraer enlaces SFP" : "Clic para expandir enlaces troncales SFP"}
+        >
+          <div className="flex items-center gap-2 flex-wrap">
+            <Radio className="w-4 h-4 text-amber-600 shrink-0" />
             <span className="text-xs uppercase tracking-tight">
               Puertos SFP (Enlaces Troncales) — {sfpPorts.length} Puertos de Fibra
             </span>
+            <span className="text-[10px] font-normal px-2 py-0.5 rounded-full bg-amber-200/80 text-amber-900 border border-amber-300">
+              {isSfpExpanded ? 'Expandido' : 'Colapsado (clic para ver)'}
+            </span>
           </div>
-          <span className="text-[10px] text-amber-700/80 font-normal font-sans">
-            Exclusivos para interconexión troncal entre switches (Backbone / Enlaces de Distribución y Core)
-          </span>
-        </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-amber-700/80 font-normal font-sans hidden sm:inline">
+              {isSfpExpanded ? 'Ocultar enlaces de fibra' : 'Mostrar enlaces de fibra'}
+            </span>
+            <ChevronDown className={`w-4 h-4 text-amber-700 transition-transform duration-200 ${isSfpExpanded ? 'rotate-180' : ''}`} />
+          </div>
+        </button>
 
-        <div className="border border-amber-200/80 rounded-lg overflow-hidden bg-amber-50/20">
+        {isSfpExpanded && (
+          <div className="border border-amber-200/80 rounded-lg overflow-hidden bg-amber-50/20">
           <table className="w-full text-left text-xs font-mono">
             <thead className="bg-amber-100/60 border-b border-amber-200 text-[10px] text-amber-900 uppercase tracking-wider">
               <tr>
@@ -1298,10 +1491,19 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
                         {/* Estado Enlace (Read-only) */}
                         <td className="py-2 px-3 whitespace-nowrap">
                           {isConnected ? (
-                            <span className="inline-flex items-center gap-1.5 text-blue-900 font-semibold text-[11px]">
-                              <ArrowRightLeft className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                              <span>{enlaceInfo?.remoteSwitchCodigo} (Puerto #{enlaceInfo?.remotePuertoNumero})</span>
-                            </span>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="inline-flex items-center gap-1 text-blue-900 font-semibold text-[11px]">
+                                <ArrowRightLeft className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                                <span>{enlaceInfo?.remoteSwitchCodigo} · SFP {enlaceInfo?.remotePuertoNumero}</span>
+                              </span>
+                              <span className={`px-1.5 py-0.2 rounded text-[10px] font-bold border ${
+                                enlaceInfo?.esPrincipal
+                                  ? 'bg-amber-100 text-amber-900 border-amber-300'
+                                  : 'bg-indigo-100 text-indigo-900 border-indigo-300'
+                              }`}>
+                                {enlaceInfo?.esPrincipal ? 'Principal' : 'Respaldo'}
+                              </span>
+                            </div>
                           ) : (
                             <span className="text-emerald-700 font-semibold text-[11px]">
                               Libre (Sin enlace)
@@ -1397,14 +1599,33 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
                       {/* Estado de Enlace Troncal */}
                       <td className="py-2.5 px-3 whitespace-nowrap">
                         {isConnected ? (
-                          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-semibold bg-blue-100/80 text-blue-900 border border-blue-300">
-                            <ArrowRightLeft className="w-3.5 h-3.5 text-blue-700 shrink-0" />
-                            <span>
-                              Conectado a <strong>{enlaceInfo?.remoteSwitchCodigo}</strong> (Puerto #{enlaceInfo?.remotePuertoNumero})
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold bg-blue-100/90 text-blue-950 border border-blue-300 shadow-2xs">
+                              <ArrowRightLeft className="w-3.5 h-3.5 text-blue-700 shrink-0" />
+                              <span>
+                                Conectado a <strong>{enlaceInfo?.remoteSwitchCodigo}</strong>{enlaceInfo?.remoteSwitchRol ? ` (${formatRolRed(enlaceInfo.remoteSwitchRol)})` : ''} · SFP {enlaceInfo?.remotePuertoNumero}
+                              </span>
                             </span>
-                          </span>
+                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border ${
+                              enlaceInfo?.esPrincipal
+                                ? 'bg-amber-100 text-amber-900 border-amber-300'
+                                : 'bg-indigo-100 text-indigo-900 border-indigo-300'
+                            }`}>
+                              {enlaceInfo?.esPrincipal ? (
+                                <>
+                                  <Zap className="w-3 h-3 text-amber-600" />
+                                  <span>Principal</span>
+                                </>
+                              ) : (
+                                <>
+                                  <ShieldCheck className="w-3 h-3 text-indigo-600" />
+                                  <span>Respaldo</span>
+                                </>
+                              )}
+                            </span>
+                          </div>
                         ) : (
-                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200">
                             <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
                             <span>Libre (Sin enlace configurado)</span>
                           </span>
@@ -1422,21 +1643,36 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
                         )}
                       </td>
 
-                      {/* Botón: Configurar Enlace Troncal (Deshabilitado Próximamente) */}
+                      {/* Botones de Acción de Enlace */}
                       <td className="py-2.5 px-3 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-center justify-end gap-1.5">
-                          <button
-                            type="button"
-                            disabled
-                            className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-100 text-slate-400 border border-slate-200 rounded text-[10px] font-semibold cursor-not-allowed shadow-2xs"
-                            title="Esta función para conectar switches y crear enlaces troncales se construye en una etapa posterior"
-                          >
-                            <Link2 className="w-3 h-3 text-slate-400" />
-                            <span>Configurar Enlace Troncal</span>
-                            <span className="text-[9px] bg-slate-200 text-slate-600 px-1 py-0.2 rounded font-normal">
-                              Próximamente
-                            </span>
-                          </button>
+                          {isConnected ? (
+                            <button
+                              type="button"
+                              onClick={() => setDisconnectConfirmEnlace({
+                                enlaceId: enlaceInfo!.enlaceId,
+                                remoteSwitchCodigo: enlaceInfo!.remoteSwitchCodigo,
+                                remotePortNum: enlaceInfo!.remotePuertoNumero,
+                                localPortNum: port.numero_puerto,
+                                esPrincipal: enlaceInfo!.esPrincipal,
+                              })}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 hover:text-rose-800 border border-rose-200 rounded text-[11px] font-semibold transition-colors cursor-pointer shadow-2xs"
+                              title="Desconectar este enlace troncal"
+                            >
+                              <Unlink className="w-3 h-3 text-rose-600" />
+                              <span>Desconectar enlace</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setSelectedSfpForTrunk(port)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-white rounded text-[11px] font-bold transition-colors cursor-pointer shadow-2xs hover:shadow-xs"
+                              title="Configurar nuevo enlace troncal hacia otro switch"
+                            >
+                              <Link2 className="w-3 h-3" />
+                              <span>Configurar Enlace Troncal</span>
+                            </button>
+                          )}
 
                           <button
                             type="button"
@@ -1455,26 +1691,100 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
             </tbody>
           </table>
         </div>
+        )}
       </div>
+
+      {/* Modal para Configurar Enlace Troncal */}
+      {selectedSfpForTrunk && (
+        <ConfigurarEnlaceTroncalDialog
+          isOpen={Boolean(selectedSfpForTrunk)}
+          onClose={() => setSelectedSfpForTrunk(null)}
+          switchOrigen={switchEquipo}
+          puertoOrigen={selectedSfpForTrunk}
+          onEnlaceCreated={async () => {
+            showToast('Enlace troncal establecido exitosamente');
+            await loadPorts();
+            onPortsUpdated?.();
+          }}
+        />
+      )}
+
+      {/* Modal de Confirmación para Desconectar Enlace Troncal */}
+      {disconnectConfirmEnlace && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl border border-slate-200 max-w-md w-full p-5 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 bg-rose-100 text-rose-700 rounded-lg shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-sm font-bold text-slate-900 font-sans">
+                  ¿Desconectar Enlace Troncal?
+                </h3>
+                <p className="text-xs text-slate-600 font-sans leading-relaxed">
+                  Se eliminará el enlace de fibra entre <strong>{switchEquipo.codigo} (SFP #{disconnectConfirmEnlace.localPortNum})</strong> y <strong>{disconnectConfirmEnlace.remoteSwitchCodigo} (SFP #{disconnectConfirmEnlace.remotePortNum})</strong> ({disconnectConfirmEnlace.esPrincipal ? 'Principal' : 'Respaldo'}). Ambos puertos volverán a quedar libres.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setDisconnectConfirmEnlace(null)}
+                disabled={disconnecting}
+                className="px-3.5 py-1.5 border border-slate-300 rounded-lg text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleDisconnectEnlace}
+                disabled={disconnecting}
+                className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
+              >
+                {disconnecting ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Desconectando...</span>
+                  </>
+                ) : (
+                  <>
+                    <Unlink className="w-3.5 h-3.5" />
+                    <span>Sí, Desconectar Enlace</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Footer Info */}
       <div className="flex flex-wrap items-center justify-between text-[10px] text-slate-500 pt-2 border-t border-slate-100">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <span>Total: <strong>{ports.length}</strong> puertos</span>
           <span>·</span>
           <span className="text-slate-700">
-            RJ45: <strong>{rj45Ports.length}</strong>
+            RJ45: <strong>{rj45All.length}</strong>
+          </span>
+          <span>·</span>
+          <span className="text-blue-700 font-bold">
+            Ocupados: <strong>{rj45OccupiedCount} ({rj45OccupancyPct}%)</strong>
+          </span>
+          <span>·</span>
+          <span className="text-amber-800 font-semibold">
+            Configurados sin conectar: <strong>{rj45ConfiguredCount}</strong>
+          </span>
+          <span>·</span>
+          <span className="text-emerald-700 font-semibold">
+            Libres: <strong>{rj45FreeCount}</strong>
           </span>
           <span>·</span>
           <span className="text-amber-800 font-semibold">
             SFP Troncales: <strong>{sfpPorts.length}</strong>
           </span>
           <span>·</span>
-          <span className="text-emerald-700 font-semibold">
-            Libres: <strong>{ports.filter(p => !p.ocupado_por_codigo).length}</strong>
-          </span>
-          <span>·</span>
-          <span className="text-indigo-700 font-semibold">
+          <span className="text-slate-500">
             Sin VLAN: <strong>{ports.filter(p => !p.vlan_numero && !p.vlan).length}</strong>
           </span>
         </div>

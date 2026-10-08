@@ -206,22 +206,29 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
 
   // Map RJ45 switch ports occupancy by switch_id
   const switchPortStats = useMemo(() => {
-    const stats: Record<string, { totalRj45: number; occupiedRj45: number }> = {};
+    const stats: Record<string, { totalRj45: number; occupiedRj45: number; configuredRj45: number; freeRj45: number }> = {};
 
     switchPorts.forEach(port => {
       if (port.tipo_puerto === 'rj45') {
         if (!stats[port.switch_id]) {
-          stats[port.switch_id] = { totalRj45: 0, occupiedRj45: 0 };
+          stats[port.switch_id] = { totalRj45: 0, occupiedRj45: 0, configuredRj45: 0, freeRj45: 0 };
         }
         stats[port.switch_id].totalRj45 += 1;
         
-        // Consider port occupied if it has ocupado_por_codigo OR uso is set and not 'Libre'
-        const isOccupied = Boolean(
-          port.ocupado_por_codigo || 
-          (port.uso && port.uso.trim() !== '' && port.uso.trim().toLowerCase() !== 'libre')
-        );
+        // CRITERIO ESTRICTO DE "OCUPADO" (Ocupación Física):
+        // Únicamente si existe una cámara o un punto de red conectado al puerto
+        // (columna ocupado_por_tipo u ocupado_por_codigo en v_puertos_switch_ocupacion).
+        // Si sólo tiene VLAN o Uso asignado pero sin dispositivo, es "Configurado", NO "Ocupado".
+        const isOccupied = Boolean(port.ocupado_por_tipo || port.ocupado_por_codigo);
+        const hasVlan = Boolean(port.vlan_numero || (port as any).vlan);
+        const hasUso = Boolean(port.uso && port.uso.trim() !== '' && port.uso.trim().toLowerCase() !== 'libre');
+
         if (isOccupied) {
           stats[port.switch_id].occupiedRj45 += 1;
+        } else if (hasVlan || hasUso) {
+          stats[port.switch_id].configuredRj45 += 1;
+        } else {
+          stats[port.switch_id].freeRj45 += 1;
         }
       }
     });

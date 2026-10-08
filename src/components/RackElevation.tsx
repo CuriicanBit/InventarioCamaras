@@ -38,7 +38,7 @@ import {
   Wrench
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Rack, Equipo, Proveedor, Marca, Modelo, TipoEquipo, Camara } from '../types/database';
+import { Rack, Equipo, Proveedor, Marca, Modelo, TipoEquipo, Camara, PuntoRed, formatRolRed, normalizeRolRedForDb } from '../types/database';
 import { calculateEquipmentOccupancy, EquipmentOccupancyInfo } from '../utils/occupancyAlerts';
 import { MarcaSelect, ModeloSelect, ProveedorSelect } from './catalogs/CatalogSelectors';
 import { DecommissionModal } from './DecommissionModal';
@@ -67,6 +67,8 @@ export const RackElevation: React.FC<RackElevationProps> = ({
 }) => {
   const [equipos, setEquipos] = useState<Equipo[]>([]);
   const [camaras, setCamaras] = useState<Camara[]>([]);
+  const [puntosRed, setPuntosRed] = useState<PuntoRed[]>([]);
+  const [switchPortsOccupation, setSwitchPortsOccupation] = useState<any[]>([]);
   const [nvrUplinks, setNvrUplinks] = useState<Record<string, any>>({});
   const [bodegaEquipos, setBodegaEquipos] = useState<Equipo[]>([]);
   const [loadingBodega, setLoadingBodega] = useState(false);
@@ -80,8 +82,15 @@ export const RackElevation: React.FC<RackElevationProps> = ({
   }, [selectedEquipo]);
   const [loading, setLoading] = useState(true);
 
-  // Panel derecho: 'detalle' o 'bodega'
-  const [rightPanelTab, setRightPanelTab] = useState<'detalle' | 'bodega'>('detalle');
+  // Cajón de Bodega deslizable (drawer lateral)
+  const [isBodegaDrawerOpen, setIsBodegaDrawerOpen] = useState(false);
+
+  // Pestañas en el panel de detalle: 'resumen' o 'puertos' (expandido para switches)
+  const [equipmentDetailTab, setEquipmentDetailTab] = useState<'resumen' | 'puertos'>('resumen');
+  const isPuertosTabActive = selectedEquipo?.tipo === 'switch' && equipmentDetailTab === 'puertos';
+
+  // Switches en este rack
+  const availableSwitchesInRack = useMemo(() => equipos.filter(e => e.tipo === 'switch'), [equipos]);
 
   // Modo de visualización de ranuras en bastidor
   const [slotDisplayMode, setSlotDisplayMode] = useState<'individual' | 'compact'>('individual');
@@ -137,6 +146,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     fecha_instalacion: string;
     proveedor_compra_id: string | null;
     proveedor_instalacion_id: string | null;
+    rol_red?: string;
     es_rackeable?: boolean;
   }>({
     rack_id: rack.id,
@@ -158,9 +168,11 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     fecha_instalacion: '',
     proveedor_compra_id: null,
     proveedor_instalacion_id: null,
+    rol_red: '',
     es_rackeable: true,
   });
   const [saving, setSaving] = useState(false);
+  const [savingRolRed, setSavingRolRed] = useState(false);
 
   const totalU = rack.altura_u || 42;
 
@@ -224,7 +236,9 @@ export const RackElevation: React.FC<RackElevationProps> = ({
         { data: provData },
         { data: marcasData },
         { data: modelosData },
-        { data: camData }
+        { data: camData },
+        { data: puntosData },
+        { data: spData }
       ] = await Promise.all([
         supabase
           .from('equipos')
@@ -237,7 +251,14 @@ export const RackElevation: React.FC<RackElevationProps> = ({
         supabase
           .from('camaras')
           .select('*, patch_panel:equipos!patch_panel_id(*), switch:equipos!switch_id(*), nvr:equipos!nvr_id(*)')
-          .or('estado_ciclo_vida.is.null,estado_ciclo_vida.eq.instalado')
+          .or('estado_ciclo_vida.is.null,estado_ciclo_vida.eq.instalado'),
+        supabase
+          .from('puntos_red')
+          .select('*')
+          .or('estado_ciclo_vida.is.null,estado_ciclo_vida.eq.instalado'),
+        supabase
+          .from('v_puertos_switch_ocupacion')
+          .select('*')
       ]);
 
       const loadedEquipos = (eqData || []).filter(
@@ -248,6 +269,8 @@ export const RackElevation: React.FC<RackElevationProps> = ({
       setMarcas(marcasData || []);
       setModelos(modelosData || []);
       setCamaras(camData || []);
+      setPuntosRed(puntosData || []);
+      setSwitchPortsOccupation(spData || []);
 
       try {
         const savedUplinks = localStorage.getItem('cctv_nvr_uplinks');
@@ -287,14 +310,20 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     loadData();
   }, [rack.id]);
 
-  // Mapa reactivo de ocupación y estándar de alerta 75% para cada equipo
+  // Mapa reactivo de ocupación física estricta y estándar de alerta 75% para cada equipo
   const equipmentOccupancyMap = useMemo(() => {
     const map: Record<string, EquipmentOccupancyInfo> = {};
     equipos.forEach(eq => {
-      map[eq.id] = calculateEquipmentOccupancy(eq, camaras, nvrUplinks);
+      map[eq.id] = calculateEquipmentOccupancy(
+        eq, 
+        camaras, 
+        nvrUplinks, 
+        puntosRed, 
+        switchPortsOccupation
+      );
     });
     return map;
-  }, [equipos, camaras, nvrUplinks]);
+  }, [equipos, camaras, nvrUplinks, puntosRed, switchPortsOccupation]);
 
   // Montar equipo desde Bodega al Rack
   const handleMountFromBodega = async (eq: Equipo, targetUSuperior: number, uHeight: number) => {
@@ -324,7 +353,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
       setEquipos(prev => [data, ...prev].sort((a, b) => (b.posicion_u_inicio || 0) - (a.posicion_u_inicio || 0)));
       setBodegaEquipos(prev => prev.filter(item => item.id !== eq.id));
       setSelectedEquipo(data);
-      setRightPanelTab('detalle');
+      setEquipmentDetailTab('resumen');
       showToast(`Equipo ${data.codigo} montado exitosamente en U${uInferior} a U${targetUSuperior}`, 'success');
     } catch (err: any) {
       console.error('Error mounting equipment from bodega:', err);
@@ -495,6 +524,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
       fecha_instalacion: new Date().toISOString().split('T')[0],
       proveedor_compra_id: null,
       proveedor_instalacion_id: null,
+      rol_red: '',
       es_rackeable: !isNonRackeable,
     });
     setIsModalOpen(true);
@@ -534,9 +564,34 @@ export const RackElevation: React.FC<RackElevationProps> = ({
       fecha_instalacion: eq.fecha_instalacion ? eq.fecha_instalacion.split('T')[0] : '',
       proveedor_compra_id: eq.proveedor_compra_id || null,
       proveedor_instalacion_id: eq.proveedor_instalacion_id || null,
+      rol_red: eq.rol_red || '',
       es_rackeable: !isNonRack,
     });
     setIsModalOpen(true);
+  };
+
+  // Quick update switch rol_red from Ficha de Equipo
+  const handleUpdateRolRed = async (equipoId: string, nuevoRol: string) => {
+    try {
+      setSavingRolRed(true);
+      const val = normalizeRolRedForDb(nuevoRol);
+      const { error } = await supabase
+        .from('equipos')
+        .update({ rol_red: val })
+        .eq('id', equipoId);
+
+      if (error) throw error;
+
+      setEquipos(prev => prev.map(eq => eq.id === equipoId ? { ...eq, rol_red: val } : eq));
+      setSelectedEquipo(prev => prev && prev.id === equipoId ? { ...prev, rol_red: val } : prev);
+      const displayLabel = formatRolRed(val);
+      showToast(`Rol de red ${displayLabel ? `actualizado a "${displayLabel}"` : 'eliminado'} para el switch`);
+    } catch (err: any) {
+      console.error('Error updating switch rol_red:', err);
+      alert('Error al actualizar el rol del switch: ' + (err.message || String(err)));
+    } finally {
+      setSavingRolRed(false);
+    }
   };
 
   // When changing equipment type: clean hidden fields and update inferred U height
@@ -627,7 +682,6 @@ export const RackElevation: React.FC<RackElevationProps> = ({
         numero_serie: formData.numero_serie.trim() || null,
         posicion_u_inicio: isNonRackeable ? null : Math.min(uInf!, uSup!),
         posicion_u_fin: isNonRackeable ? null : Math.max(uInf!, uSup!),
-        u_range: isNonRackeable ? 'Piso / Shaft' : null,
         fecha_compra: formData.fecha_compra.trim() || null,
         fecha_instalacion: formData.fecha_instalacion.trim() || null,
         proveedor_compra_id: formData.proveedor_compra_id || null,
@@ -643,6 +697,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
           ? formData.ip_gestion.trim() : null,
         vlan: (isSwitch || isNvr) && formData.vlan.trim()
           ? Number(formData.vlan) : null,
+        rol_red: isSwitch ? normalizeRolRedForDb(formData.rol_red) : null,
       };
 
       if (isEditing && formData.id) {
@@ -849,7 +904,9 @@ export const RackElevation: React.FC<RackElevationProps> = ({
             key={`eq-${eq.id}-${slotTopU}`}
             onClick={() => {
               setSelectedEquipo(eq);
-              setRightPanelTab('detalle');
+              if (eq.tipo !== 'switch') {
+                setEquipmentDetailTab('resumen');
+              }
             }}
             draggable={true}
             onDragStart={(e) => {
@@ -1145,15 +1202,16 @@ export const RackElevation: React.FC<RackElevationProps> = ({
             <span>Bitácora Rack</span>
           </button>
 
-          {/* Botón para abrir o destacar el Cajón de Bodega */}
+          {/* Botón para abrir el Cajón de Bodega deslizable */}
           <button
             type="button"
-            onClick={() => setRightPanelTab(rightPanelTab === 'bodega' ? 'detalle' : 'bodega')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded transition-colors shadow-2xs border ${
-              rightPanelTab === 'bodega'
-                ? 'bg-amber-600 text-white border-amber-600'
+            onClick={() => setIsBodegaDrawerOpen(prev => !prev)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded transition-colors shadow-2xs border cursor-pointer ${
+              isBodegaDrawerOpen
+                ? 'bg-amber-600 text-white border-amber-600 ring-2 ring-amber-400'
                 : 'bg-amber-50 hover:bg-amber-100 text-amber-900 border-amber-300'
             }`}
+            title={isBodegaDrawerOpen ? "Cerrar panel de bodega" : "Abrir panel deslizable de bodega"}
           >
             <Archive className="w-4 h-4 text-amber-600 group-hover:text-amber-800" />
             <span>Cajón Bodega ({bodegaEquipos.length})</span>
@@ -1180,8 +1238,269 @@ export const RackElevation: React.FC<RackElevationProps> = ({
         </div>
       </div>
 
-      {/* Main Grid: Rack Elevation (Left) & Inspector / Bodega Drawer (Right) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+      {/* Main Grid: Conditional Layout (Expanded Puertos vs 2-Column Resumen) */}
+      {isPuertosTabActive && selectedEquipo ? (
+        /* ============================================================ */
+        /* LAYOUT EXPANDIDO: PESTAÑA "PUERTOS Y VLANS" ACTIVA           */
+        /* Rack compacto arriba + Tabla Puertos/VLANs ancho completo    */
+        /* ============================================================ */
+        <div className="space-y-6">
+          {/* BLOQUE COMPACTO SUPERIOR */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+            {/* Columna Izquierda: Elevación del Rack Compacta con scroll interno */}
+            <div className="lg:col-span-6 bg-white border border-slate-200 rounded-lg p-4 shadow-xs">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-2.5 border-b border-slate-200 mb-3 gap-2">
+                <div className="flex items-center gap-2">
+                  <Server className="w-4 h-4 text-blue-600" />
+                  <h2 className="text-xs font-bold text-slate-900 tracking-tight">
+                    Elevación Rack {rack.codigo} ({totalU}U a 1U)
+                  </h2>
+                  <span className="text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.2 rounded font-semibold">
+                    Modo Compacto
+                  </span>
+                </div>
+                <div className="flex items-center border border-slate-200 rounded bg-slate-50 p-0.5 text-[10px] font-mono">
+                  <button
+                    type="button"
+                    onClick={() => setSlotDisplayMode('individual')}
+                    className={`px-1.5 py-0.5 rounded transition-colors ${
+                      slotDisplayMode === 'individual'
+                        ? 'bg-white shadow-2xs font-bold text-slate-800 border border-slate-200'
+                        : 'text-slate-500 hover:text-slate-800'
+                    }`}
+                  >
+                    1U
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSlotDisplayMode('compact')}
+                    className={`px-1.5 py-0.5 rounded transition-colors ${
+                      slotDisplayMode === 'compact'
+                        ? 'bg-white shadow-2xs font-bold text-slate-800 border border-slate-200'
+                        : 'text-slate-500 hover:text-slate-800'
+                    }`}
+                  >
+                    Agrupado
+                  </button>
+                </div>
+              </div>
+
+              {/* Physical Cabinet Frame compacto con scroll */}
+              <div className="bg-[#0f172a] p-2.5 rounded-lg border-2 border-slate-700 shadow-sm">
+                <div className="bg-slate-800 text-slate-300 py-1 px-2.5 rounded-t border-b border-slate-700 text-center text-[9px] font-mono font-bold tracking-widest uppercase flex items-center justify-between">
+                  <span>RIEL IZQ</span>
+                  <span className="text-white">BASTIDOR {totalU}U (19")</span>
+                  <span>RIEL DER</span>
+                </div>
+                <div className="border border-slate-700 bg-slate-900 max-h-[290px] overflow-y-auto pr-0.5 scrollbar-thin">
+                  {renderRackRows()}
+                </div>
+              </div>
+              <p className="text-[10px] text-slate-400 mt-2 text-center font-mono">
+                💡 Haz clic en otro switch para inspeccionar sus puertos, o pulsa "Ver Resumen" para volver al panel lateral.
+              </p>
+            </div>
+
+            {/* Columna Derecha: Tarjeta de Resumen y Control del Switch */}
+            <div className="lg:col-span-6 bg-white border border-slate-200 rounded-lg p-5 shadow-xs flex flex-col justify-between">
+              <div>
+                {/* Header con cambio de Pestaña */}
+                <div className="flex items-center justify-between pb-3 border-b border-slate-200 mb-3 gap-2 flex-wrap">
+                  <div className="flex items-center gap-2.5">
+                    <div className="p-2 bg-blue-100 text-blue-700 rounded-lg">
+                      <Network className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-base font-bold font-mono text-slate-900">
+                          {selectedEquipo.codigo}
+                        </span>
+                        {selectedEquipo.rol_red && (
+                          <span className={`text-[10px] font-sans font-semibold px-2 py-0.5 rounded-full border shadow-2xs ${
+                            normalizeRolRedForDb(selectedEquipo.rol_red) === 'core'
+                              ? 'bg-purple-100 text-purple-800 border-purple-200'
+                              : normalizeRolRedForDb(selectedEquipo.rol_red) === 'distribucion'
+                              ? 'bg-blue-100 text-blue-800 border-blue-200'
+                              : 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                          }`}>
+                            {formatRolRed(selectedEquipo.rol_red)}
+                          </span>
+                        )}
+                        <span className="text-xs font-mono font-semibold bg-blue-100 text-blue-800 px-2 py-0.5 rounded">
+                          U{String(selectedEquipo.posicion_u_inicio || 1).padStart(2, '0')}
+                          {selectedEquipo.posicion_u_fin && selectedEquipo.posicion_u_fin !== selectedEquipo.posicion_u_inicio && (
+                            ` - U${String(selectedEquipo.posicion_u_fin).padStart(2, '0')}`
+                          )}
+                        </span>
+                      </div>
+                      <span className="text-xs text-slate-500 font-sans">
+                        {selectedEquipo.marca_rel?.nombre || selectedEquipo.marca} {selectedEquipo.modelo_rel?.nombre || selectedEquipo.modelo}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Pestañas: Resumen vs Puertos y VLANs */}
+                  <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-lg border border-slate-200">
+                    <button
+                      type="button"
+                      onClick={() => setEquipmentDetailTab('resumen')}
+                      className="px-2.5 py-1 rounded text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-white transition-all flex items-center gap-1 cursor-pointer"
+                      title="Volver a la vista de 2 columnas con resumen detallado"
+                    >
+                      <Server className="w-3.5 h-3.5" />
+                      <span>Ver Resumen</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="px-2.5 py-1 rounded text-xs font-bold bg-indigo-600 text-white shadow-xs flex items-center gap-1 cursor-default"
+                    >
+                      <Cpu className="w-3.5 h-3.5" />
+                      <span>Puertos y VLANs</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Métricas rápidas de ocupación física */}
+                {(() => {
+                  const occ = equipmentOccupancyMap[selectedEquipo.id];
+                  return (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3 font-mono text-xs">
+                      <div className="bg-slate-50 p-2.5 rounded border border-slate-200">
+                        <span className="text-[10px] text-slate-400 block uppercase">Capacidad</span>
+                        <span className="font-bold text-slate-800 text-sm">
+                          {selectedEquipo.puertos_totales || 24} Puertos
+                        </span>
+                      </div>
+                      <div className="bg-blue-50/70 p-2.5 rounded border border-blue-200">
+                        <span className="text-[10px] text-blue-600 block uppercase">Ocupados</span>
+                        <span className="font-bold text-blue-900 text-sm">
+                          {occ?.occupiedCount ?? 0} ({occ?.percentage ?? 0}%)
+                        </span>
+                      </div>
+                      <div className="bg-emerald-50/70 p-2.5 rounded border border-emerald-200">
+                        <span className="text-[10px] text-emerald-600 block uppercase">Libres</span>
+                        <span className="font-bold text-emerald-900 text-sm">
+                          {occ?.availableCount ?? (selectedEquipo.puertos_totales || 24)}
+                        </span>
+                      </div>
+                      <div className="bg-indigo-50/70 p-2.5 rounded border border-indigo-200">
+                        <span className="text-[10px] text-indigo-600 block uppercase">IP Gestión</span>
+                        <span className="font-bold text-indigo-900 text-[11px] truncate block" title={selectedEquipo.ip_gestion || ''}>
+                          {selectedEquipo.ip_gestion || 'No asignada'}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Selector rápido de switches del rack */}
+                {availableSwitchesInRack.length > 1 && (
+                  <div className="flex items-center gap-2 p-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono mb-2">
+                    <span className="text-slate-500 text-[11px] shrink-0 font-sans">Switches en este Rack:</span>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {availableSwitchesInRack.map(sw => (
+                        <button
+                          key={sw.id}
+                          type="button"
+                          onClick={() => setSelectedEquipo(sw)}
+                          className={`px-2 py-0.5 rounded text-[11px] font-bold border transition-colors cursor-pointer flex items-center gap-1.5 ${
+                            sw.id === selectedEquipo.id
+                              ? 'bg-blue-600 text-white border-blue-600 shadow-2xs'
+                              : 'bg-white text-slate-700 border-slate-300 hover:bg-blue-50 hover:text-blue-700'
+                          }`}
+                        >
+                          <span>{sw.codigo}</span>
+                          {sw.rol_red && (
+                            <span className={`text-[9px] font-semibold px-1.5 py-0.2 rounded ${
+                              sw.id === selectedEquipo.id
+                                ? 'bg-blue-800 text-blue-100'
+                                : normalizeRolRedForDb(sw.rol_red) === 'core'
+                                ? 'bg-purple-100 text-purple-800 border border-purple-200'
+                                : normalizeRolRedForDb(sw.rol_red) === 'distribucion'
+                                ? 'bg-blue-100 text-blue-800 border border-blue-200'
+                                : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                            }`}>
+                              {formatRolRed(sw.rol_red)}
+                            </span>
+                          )}
+                          {sw.posicion_u_inicio ? <span className="opacity-75 font-normal text-[10px]">(U{sw.posicion_u_inicio})</span> : null}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Botones de acción inferior */}
+              <div className="flex items-center justify-between pt-3 border-t border-slate-200 gap-2 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onNavigateToPorts(selectedEquipo.id)}
+                    className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Cpu className="w-3.5 h-3.5 text-blue-600" />
+                    <span>Mapeo Cruzado (Cross-Connect)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleOpenEditModal(selectedEquipo)}
+                    className="px-3 py-1.5 border border-slate-300 hover:bg-slate-50 text-slate-700 rounded text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Edit className="w-3.5 h-3.5 text-slate-500" />
+                    <span>Editar Parámetros</span>
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setEquipmentDetailTab('resumen')}
+                  className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                >
+                  <span>Volver a Resumen</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* TABLA DE PUERTOS Y VLANS A ANCHO COMPLETO */}
+          <div className="bg-white border border-slate-200 rounded-lg p-5 shadow-xs w-full">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-200 mb-4 gap-2">
+              <div className="flex items-center gap-2">
+                <Cpu className="w-4 h-4 text-indigo-600" />
+                <h2 className="text-sm font-bold text-slate-900 tracking-tight font-mono">
+                  Puertos y VLANs — {selectedEquipo.codigo} ({selectedEquipo.marca_rel?.nombre || selectedEquipo.marca} {selectedEquipo.modelo_rel?.nombre || selectedEquipo.modelo})
+                </h2>
+                <span className="text-[10px] font-mono bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded font-bold">
+                  Ancho Completo
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEquipmentDetailTab('resumen')}
+                className="text-xs text-blue-600 hover:text-blue-800 font-semibold flex items-center gap-1 self-start sm:self-auto cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Volver a vista de 2 columnas</span>
+              </button>
+            </div>
+
+            <SwitchPortsTable
+              switchEquipo={selectedEquipo}
+              availableSwitches={equipos.filter(e => e.tipo === 'switch')}
+              onSelectSwitch={(sw) => setSelectedEquipo(sw)}
+              onPortsUpdated={() => {
+                loadData({ preserveSelectedId: selectedEquipo.id, background: true });
+              }}
+            />
+          </div>
+        </div>
+      ) : (
+        /* ============================================================ */
+        /* LAYOUT ESTÁNDAR: 2 COLUMNAS (Rack a la izq, Panel a la der) */
+        /* ============================================================ */
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* LEFT: Bastidor 19" Rack Elevation */}
         <div className="lg:col-span-7 bg-white border border-slate-200 rounded-lg p-5 shadow-xs">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-200 mb-4 gap-2">
@@ -1316,7 +1635,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                         key={eq.id}
                         onClick={() => {
                           setSelectedEquipo(eq);
-                          setRightPanelTab('detalle');
+                          setEquipmentDetailTab('resumen');
                         }}
                         className={`group relative p-2.5 rounded-lg border transition-all cursor-pointer select-none ${
                           isSelected
@@ -1377,78 +1696,43 @@ export const RackElevation: React.FC<RackElevationProps> = ({
           </div>
         </div>
 
-        {/* RIGHT: Tabs (Ficha Técnica & Cajón de Bodega) */}
+        {/* RIGHT: Ficha Técnica del Equipo (Pestañas Resumen / Puertos y VLANs) */}
         <div className="lg:col-span-5 space-y-4">
-          {/* Tab selector */}
-          <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
-            <button
-              type="button"
-              onClick={() => setRightPanelTab('detalle')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold font-mono transition-all flex items-center gap-1.5 border ${
-                rightPanelTab === 'detalle'
-                  ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
-                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
-              }`}
-            >
-              <Server className="w-3.5 h-3.5" />
-              <span>Ficha del Equipo {selectedEquipo ? `(${selectedEquipo.codigo})` : ''}</span>
-            </button>
+          {/* Equipment Tab selector */}
+          {selectedEquipo && (
+            <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
+              <button
+                type="button"
+                onClick={() => setEquipmentDetailTab('resumen')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold font-mono transition-all flex items-center gap-1.5 border cursor-pointer ${
+                  equipmentDetailTab === 'resumen'
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                }`}
+              >
+                <Server className="w-3.5 h-3.5" />
+                <span>Resumen ({selectedEquipo.codigo})</span>
+              </button>
 
-            <button
-              type="button"
-              onClick={() => setRightPanelTab('bodega')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold font-mono transition-all flex items-center gap-1.5 border ${
-                rightPanelTab === 'bodega'
-                  ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
-                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
-              }`}
-            >
-              <Archive className="w-3.5 h-3.5 text-amber-500" />
-              <span>Cajón de Bodega</span>
-              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-bold ${
-                rightPanelTab === 'bodega' ? 'bg-amber-800 text-white' : 'bg-amber-100 text-amber-900 border border-amber-300'
-              }`}>
-                {bodegaEquipos.length}
-              </span>
-            </button>
-          </div>
+              {selectedEquipo.tipo === 'switch' && (
+                <button
+                  type="button"
+                  onClick={() => setEquipmentDetailTab('puertos')}
+                  className="px-3 py-1.5 rounded-lg text-xs font-bold font-mono transition-all flex items-center gap-1.5 border cursor-pointer bg-white text-slate-600 border-slate-200 hover:bg-indigo-50 hover:text-indigo-700 hover:border-indigo-300"
+                  title="Abrir tabla expandida de Puertos y VLANs a ancho completo"
+                >
+                  <Cpu className="w-3.5 h-3.5 text-indigo-500" />
+                  <span>Puertos y VLANs</span>
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">
+                    Expandir
+                  </span>
+                </button>
+              )}
+            </div>
+          )}
 
-          {/* Tab Content: Cajón de Bodega */}
-          {rightPanelTab === 'bodega' ? (
-            <RackBodegaDrawer
-              isOpen={true}
-              onToggle={() => setRightPanelTab('detalle')}
-              bodegaEquipos={bodegaEquipos}
-              loadingBodega={loadingBodega}
-              onRefreshBodega={loadBodegaData}
-              onMountEquipo={(eq, targetU, uHeight) => handleMountFromBodega(eq, targetU, uHeight)}
-              occupiedSlotsMap={occupiedSlotsMap}
-              totalU={totalU}
-              onDragStartBodegaItem={(eq, uHeight) => {
-                setDraggedItem({
-                  id: eq.id,
-                  source: 'bodega',
-                  codigo: eq.codigo,
-                  tipo: eq.tipo,
-                  uHeight: uHeight
-                });
-              }}
-              onDragEndBodegaItem={() => {
-                setDraggedItem(null);
-                setDragOverTarget(null);
-              }}
-              isDraggingFromRack={draggedItem?.source === 'rack'}
-              onDropToBodega={() => {
-                if (draggedItem?.id) {
-                  handleDismantleToBodega(draggedItem.id);
-                  setDraggedItem(null);
-                  setDragOverTarget(null);
-                }
-              }}
-            />
-          ) : (
-            /* Tab Content: Ficha Técnica del Equipo Seleccionado */
-            selectedEquipo ? (
+          {/* Tab Content: Ficha Técnica del Equipo Seleccionado */}
+          {selectedEquipo ? (
               <div className="bg-white border border-slate-200 rounded-lg shadow-xs overflow-hidden">
                 {/* Header */}
                 <div className="p-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
@@ -1456,8 +1740,19 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                     <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider block">
                       IDENTIFICADOR TÉCNICO
                     </span>
-                    <div className="text-lg font-bold font-mono text-slate-900 flex items-center gap-2">
+                    <div className="text-lg font-bold font-mono text-slate-900 flex items-center gap-2 flex-wrap">
                       <span>{selectedEquipo.codigo}</span>
+                      {selectedEquipo.tipo === 'switch' && selectedEquipo.rol_red && (
+                        <span className={`text-xs font-mono font-semibold px-2 py-0.5 rounded-full border shadow-2xs ${
+                          normalizeRolRedForDb(selectedEquipo.rol_red) === 'core'
+                            ? 'bg-purple-100 text-purple-800 border-purple-200'
+                            : normalizeRolRedForDb(selectedEquipo.rol_red) === 'distribucion'
+                            ? 'bg-blue-100 text-blue-800 border-blue-200'
+                            : 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                        }`}>
+                          {formatRolRed(selectedEquipo.rol_red)}
+                        </span>
+                      )}
                       {(!selectedEquipo.posicion_u_inicio || selectedEquipo.posicion_u_inicio === 0 || selectedEquipo.u_range === 'Piso / Shaft') ? (
                         <span className="text-xs font-mono font-semibold bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 rounded flex items-center gap-1">
                           <Zap className="w-3 h-3 text-amber-600" />
@@ -1514,6 +1809,44 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                       }
                     </p>
                   </div>
+
+                  {/* Rol en la Red (Editable para Switches) */}
+                  {selectedEquipo.tipo === 'switch' && (
+                    <div className="p-3 bg-purple-50/60 border border-purple-200/80 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                      <div>
+                        <span className="text-[10px] font-mono text-purple-900 uppercase tracking-wider block font-bold">
+                          Rol en la Red
+                        </span>
+                        <span className="text-xs text-slate-600 font-sans">
+                          Jerarquía del switch en la red (Acceso, Distribución o Core)
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <select
+                          value={normalizeRolRedForDb(selectedEquipo.rol_red) || ''}
+                          disabled={savingRolRed}
+                          onChange={(e) => handleUpdateRolRed(selectedEquipo.id, e.target.value)}
+                          className="text-xs font-mono font-bold px-2.5 py-1.5 bg-white border border-purple-300 rounded-md text-slate-800 focus:outline-none focus:ring-2 focus:ring-purple-500 shadow-2xs cursor-pointer"
+                        >
+                          <option value="">Sin definir (vacío)</option>
+                          <option value="acceso">Acceso</option>
+                          <option value="distribucion">Distribución</option>
+                          <option value="core">Core</option>
+                        </select>
+                        {selectedEquipo.rol_red && (
+                          <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border shrink-0 ${
+                            normalizeRolRedForDb(selectedEquipo.rol_red) === 'core'
+                              ? 'bg-purple-100 text-purple-800 border-purple-300'
+                              : normalizeRolRedForDb(selectedEquipo.rol_red) === 'distribucion'
+                              ? 'bg-blue-100 text-blue-800 border-blue-300'
+                              : 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                          }`}>
+                            {formatRolRed(selectedEquipo.rol_red)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Technical Specs Grid */}
                   <div className="grid grid-cols-2 gap-3 bg-slate-50 p-3 rounded border border-slate-200 text-[11px]">
@@ -1671,7 +2004,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
 
                           {occ.connectedCameras.length === 0 && occ.connectedUplinks.length === 0 ? (
                             <div className="text-center py-3 text-slate-400 text-[11px]">
-                              <span>No hay cámaras ni enlaces conectados a este equipo.</span>
+                              <span>No hay cámaras ni dispositivos de red conectados a este equipo.</span>
                             </div>
                           ) : (
                             <div className="max-h-52 overflow-y-auto divide-y divide-slate-200 space-y-1 pr-1 scrollbar-thin">
@@ -1686,24 +2019,35 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                                   <span className="text-[10px] text-amber-700 font-mono">1 Gbps</span>
                                 </div>
                               ))}
-                              {occ.connectedCameras.map((conn: any, idx: number) => (
-                                <div key={`cam-${conn.camera.id}-${idx}`} className="pt-1.5 pb-1 flex items-center justify-between text-[11px]">
-                                  <div className="flex items-center gap-2 min-w-0">
-                                    <span className="font-mono font-bold text-blue-800 bg-blue-100 px-1.5 py-0.2 rounded text-[10px] border border-blue-200 shrink-0">
-                                      {conn.portOrChannel}
-                                    </span>
-                                    <div className="min-w-0">
-                                      <span className="font-bold text-slate-900 block truncate">
-                                        {conn.camera.codigo}
+                              {occ.connectedCameras.map((conn: any, idx: number) => {
+                                const isPuntoRed = conn.camera?.tipo_dispositivo === 'punto_red' || conn.camera?.modelo === 'Punto de Red';
+                                return (
+                                  <div key={`cam-${conn.camera.id || idx}-${idx}`} className="pt-1.5 pb-1 flex items-center justify-between text-[11px]">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <span className={`font-mono font-bold px-1.5 py-0.2 rounded text-[10px] border shrink-0 ${
+                                        isPuntoRed 
+                                          ? 'text-indigo-800 bg-indigo-100 border-indigo-200' 
+                                          : 'text-blue-800 bg-blue-100 border-blue-200'
+                                      }`}>
+                                        {conn.portOrChannel}
                                       </span>
-                                      <span className="text-[10px] text-slate-500 block truncate">
-                                        {conn.camera.modelo || conn.camera.tipo_dispositivo || 'Cámara'} {conn.camera.direccion_ip ? `· IP ${conn.camera.direccion_ip}` : ''}
-                                      </span>
+                                      <div className="min-w-0">
+                                        <span className="font-bold text-slate-900 block truncate">
+                                          {conn.camera.codigo}
+                                        </span>
+                                        <span className="text-[10px] text-slate-500 block truncate">
+                                          {conn.camera.modelo || conn.camera.tipo_dispositivo || (isPuntoRed ? 'Punto de Red' : 'Cámara')} {conn.camera.direccion_ip ? `· IP ${conn.camera.direccion_ip}` : ''}
+                                        </span>
+                                      </div>
                                     </div>
+                                    {isPuntoRed ? (
+                                      <Network className="w-3.5 h-3.5 text-indigo-500 shrink-0 ml-2" />
+                                    ) : (
+                                      <Camera className="w-3.5 h-3.5 text-blue-500 shrink-0 ml-2" />
+                                    )}
                                   </div>
-                                  <Camera className="w-3.5 h-3.5 text-blue-500 shrink-0 ml-2" />
-                                </div>
-                              ))}
+                                );
+                              })}
                             </div>
                           )}
                         </div>
@@ -1713,6 +2057,18 @@ export const RackElevation: React.FC<RackElevationProps> = ({
 
                   {/* Actions */}
                   <div className="pt-2 flex flex-col gap-2">
+                    {/* Botón directo a Puertos y VLANs (Modo Expandido) */}
+                    {selectedEquipo.tipo === 'switch' && (
+                      <button
+                        type="button"
+                        onClick={() => setEquipmentDetailTab('puertos')}
+                        className="w-full py-2.5 px-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-xs font-bold flex items-center justify-center gap-2 transition-colors shadow-xs cursor-pointer"
+                      >
+                        <Cpu className="w-4 h-4" />
+                        <span>Abrir Puertos y VLANs (Modo Expandido)</span>
+                      </button>
+                    )}
+
                     {(selectedEquipo.tipo === 'switch' || selectedEquipo.tipo === 'patch_panel') && (
                       <button
                         onClick={() => onNavigateToPorts(selectedEquipo.id)}
@@ -1751,20 +2107,6 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                       </button>
                     </div>
                   </div>
-
-                  {/* NUEVA SECCIÓN: Puertos y VLANs (solo cuando el equipo es un Switch) */}
-                  {selectedEquipo.tipo === 'switch' && (
-                    <div className="pt-4 border-t border-slate-200">
-                      <SwitchPortsTable
-                        switchEquipo={selectedEquipo}
-                        availableSwitches={equipos.filter(e => e.tipo === 'switch')}
-                        onSelectSwitch={(sw) => setSelectedEquipo(sw)}
-                        onPortsUpdated={() => {
-                          loadData({ preserveSelectedId: selectedEquipo.id, background: true });
-                        }}
-                      />
-                    </div>
-                  )}
                 </div>
               </div>
             ) : equipos.length === 0 ? (
@@ -1779,8 +2121,8 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                 <div className="flex items-center justify-center gap-2 pt-2">
                   <button
                     type="button"
-                    onClick={() => setRightPanelTab('bodega')}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded text-xs font-semibold shadow-xs transition-colors"
+                    onClick={() => setIsBodegaDrawerOpen(true)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded text-xs font-semibold shadow-xs transition-colors cursor-pointer"
                   >
                     <Archive className="w-3.5 h-3.5" />
                     <span>Ver Cajón de Bodega</span>
@@ -1799,8 +2141,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
               <div className="bg-white border border-slate-200 rounded-lg p-8 text-center text-slate-400 text-xs">
                 Haz clic sobre cualquier equipo del bastidor para examinar su ficha técnica, o abre el <strong>Cajón de Bodega</strong> para montar más dispositivos.
               </div>
-            )
-          )}
+            )}
 
           {/* Resumen de Ocupación U */}
           <div className="bg-white border border-slate-200 rounded-lg p-5 shadow-xs">
@@ -1831,6 +2172,40 @@ export const RackElevation: React.FC<RackElevationProps> = ({
           </div>
         </div>
       </div>
+      )}
+
+      {/* Cajón de Bodega Deslizable (Drawer Lateral) */}
+      <RackBodegaDrawer
+        isOpen={isBodegaDrawerOpen}
+        onToggle={() => setIsBodegaDrawerOpen(false)}
+        bodegaEquipos={bodegaEquipos}
+        loadingBodega={loadingBodega}
+        onRefreshBodega={loadBodegaData}
+        onMountEquipo={(eq, targetU, uHeight) => handleMountFromBodega(eq, targetU, uHeight)}
+        occupiedSlotsMap={occupiedSlotsMap}
+        totalU={totalU}
+        onDragStartBodegaItem={(eq, uHeight) => {
+          setDraggedItem({
+            id: eq.id,
+            source: 'bodega',
+            codigo: eq.codigo,
+            tipo: eq.tipo,
+            uHeight: uHeight
+          });
+        }}
+        onDragEndBodegaItem={() => {
+          setDraggedItem(null);
+          setDragOverTarget(null);
+        }}
+        isDraggingFromRack={draggedItem?.source === 'rack'}
+        onDropToBodega={() => {
+          if (draggedItem?.id) {
+            handleDismantleToBodega(draggedItem.id);
+            setDraggedItem(null);
+            setDragOverTarget(null);
+          }
+        }}
+      />
 
       {/* Modal para Registrar / Editar Montaje */}
       {isModalOpen && (
@@ -2319,6 +2694,21 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                             className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white font-mono focus:ring-1 focus:ring-blue-600 text-xs"
                           />
                         </div>
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-slate-700 font-semibold mb-1">
+                          Rol en la Red
+                        </label>
+                        <select
+                          value={normalizeRolRedForDb(formData.rol_red) || ''}
+                          onChange={(e) => setFormData({ ...formData, rol_red: e.target.value })}
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white font-mono focus:ring-1 focus:ring-blue-600 text-xs font-semibold"
+                        >
+                          <option value="">Sin definir (vacío)</option>
+                          <option value="acceso">Acceso</option>
+                          <option value="distribucion">Distribución</option>
+                          <option value="core">Core</option>
+                        </select>
                       </div>
                     </div>
                   )}

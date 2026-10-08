@@ -26,7 +26,7 @@ import {
   LayoutDashboard
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Equipo, Camara, Rack, Piso, Edificio, Campus, Sede } from '../types/database';
+import { Equipo, Camara, Rack, Piso, Edificio, Campus, Sede, PuntoRed } from '../types/database';
 import { calculateEquipmentOccupancy, EquipmentOccupancyInfo, OccupancyStatus } from '../utils/occupancyAlerts';
 import { exportReportToExcel, exportReportToPdf, ReportFilterItem, ReportKpiSummaryItem } from '../utils/reportExport';
 import { LocationInventoryReport } from './LocationInventoryReport';
@@ -48,6 +48,8 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   const [loading, setLoading] = useState(true);
   const [equipos, setEquipos] = useState<Equipo[]>([]);
   const [camaras, setCamaras] = useState<Camara[]>([]);
+  const [puntosRed, setPuntosRed] = useState<PuntoRed[]>([]);
+  const [switchPortsOccupancy, setSwitchPortsOccupancy] = useState<any[]>([]);
   const [racks, setRacks] = useState<Rack[]>([]);
   const [pisos, setPisos] = useState<Piso[]>([]);
   const [edificios, setEdificios] = useState<Edificio[]>([]);
@@ -80,6 +82,8 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
       const [
         { data: eqData },
         { data: camData },
+        { data: puntosData },
+        { data: spData },
         { data: rkData },
         { data: psData },
         { data: edData },
@@ -94,6 +98,13 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           .from('camaras')
           .select('*, patch_panel:equipos!patch_panel_id(*), switch:equipos!switch_id(*), nvr:equipos!nvr_id(*)')
           .order('codigo'),
+        supabase
+          .from('puntos_red')
+          .select('*')
+          .or('estado_ciclo_vida.is.null,estado_ciclo_vida.eq.instalado'),
+        supabase
+          .from('v_puertos_switch_ocupacion')
+          .select('*'),
         supabase.from('racks').select('*, piso:pisos(*)').order('codigo'),
         supabase.from('pisos').select('*').order('nombre'),
         supabase.from('edificios').select('*').order('nombre'),
@@ -103,6 +114,8 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
 
       setEquipos(eqData || []);
       setCamaras(camData || []);
+      setPuntosRed(puntosData || []);
+      setSwitchPortsOccupancy(spData || []);
       setRacks(rkData || []);
       setPisos(psData || []);
       setEdificios(edData || []);
@@ -124,7 +137,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   const pisosMap = useMemo(() => new Map(pisos.map(p => [p.id, p])), [pisos]);
   const edificiosMap = useMemo(() => new Map(edificios.map(e => [e.id, e])), [edificios]);
 
-  // Compute occupancy for switches, NVRs, and patch panels
+  // Compute occupancy for switches, NVRs, and patch panels using strict physical criteria
   const occupancyList = useMemo(() => {
     const relevant = equipos.filter(
       e => (!e.estado_ciclo_vida || e.estado_ciclo_vida === 'instalado') &&
@@ -135,7 +148,13 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     );
 
     return relevant.map(eq => {
-      const occ = calculateEquipmentOccupancy(eq, activeCams, nvrUplinks);
+      const occ = calculateEquipmentOccupancy(
+        eq, 
+        activeCams, 
+        nvrUplinks, 
+        puntosRed, 
+        switchPortsOccupancy
+      );
       const rack = eq.rack_id ? racksMap.get(eq.rack_id) : undefined;
       const piso = rack?.piso_id ? pisosMap.get(rack.piso_id) : undefined;
       const edificio = piso?.edificio_id ? edificiosMap.get(piso.edificio_id) : undefined;
@@ -154,7 +173,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         modeloNombre: eq.modelo_rel?.nombre || eq.modelo || 'Sin Modelo',
       };
     });
-  }, [equipos, camaras, nvrUplinks, racksMap, pisosMap, edificiosMap]);
+  }, [equipos, camaras, puntosRed, switchPortsOccupancy, nvrUplinks, racksMap, pisosMap, edificiosMap]);
 
   // Filtered list
   const filteredList = useMemo(() => {
@@ -894,12 +913,12 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                                   <div className="flex items-center gap-2">
                                     <Cpu className="w-4 h-4 text-blue-600" />
                                     <span className="font-bold text-slate-800 text-xs">
-                                      Dispositivos Conectados a {item.equipoCodigo} ({item.connectedCameras.length} cámaras vinculadas)
+                                      Dispositivos Conectados a {item.equipoCodigo} ({item.connectedCameras.length} dispositivos vinculados)
                                     </span>
                                   </div>
                                   <div className="flex items-center gap-2 text-[11px]">
                                     <span className="text-slate-500">
-                                      {item.availableCount} {item.tipo === 'nvr' ? 'canales' : 'puertos'} disponibles para nuevas cámaras
+                                      {item.availableCount} {item.tipo === 'nvr' ? 'canales' : 'puertos'} disponibles para nuevas conexiones
                                     </span>
                                     {onNavigateToPorts && (
                                       <button
@@ -928,35 +947,42 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
 
                                 {item.connectedCameras.length === 0 ? (
                                   <div className="p-4 text-center text-slate-400 text-xs">
-                                    No hay cámaras registradas en los puertos o canales de este dispositivo.
+                                    No hay dispositivos registrados en los puertos o canales de este dispositivo.
                                   </div>
                                 ) : (
                                   <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 pt-1">
-                                    {item.connectedCameras.map(({ camera: cam, portOrChannel, details }) => (
-                                      <div
-                                        key={cam.id}
-                                        onClick={() => onSelectCamera && onSelectCamera(cam)}
-                                        className="p-2 bg-white rounded border border-slate-200 hover:border-blue-400 cursor-pointer transition-all shadow-2xs space-y-1 hover:shadow-xs group"
-                                      >
-                                        <div className="flex items-center justify-between text-[11px]">
-                                          <span className="font-bold font-mono text-blue-700 bg-blue-50 px-1.5 py-0.2 rounded border border-blue-200">
-                                            {portOrChannel}
-                                          </span>
-                                          <Camera className="w-3.5 h-3.5 text-slate-400 group-hover:text-blue-600" />
+                                    {item.connectedCameras.map(({ camera: cam, portOrChannel, details }) => {
+                                      const isPunto = cam.tipo_dispositivo === 'punto_red';
+                                      return (
+                                        <div
+                                          key={cam.id}
+                                          onClick={() => onSelectCamera && !isPunto && onSelectCamera(cam)}
+                                          className={`p-2 bg-white rounded border border-slate-200 transition-all shadow-2xs space-y-1 hover:shadow-xs group ${!isPunto ? 'hover:border-blue-400 cursor-pointer' : 'cursor-default'}`}
+                                        >
+                                          <div className="flex items-center justify-between text-[11px]">
+                                            <span className={`font-bold font-mono px-1.5 py-0.2 rounded border ${isPunto ? 'text-indigo-700 bg-indigo-50 border-indigo-200' : 'text-blue-700 bg-blue-50 border-blue-200'}`}>
+                                              {portOrChannel}
+                                            </span>
+                                            {isPunto ? (
+                                              <Network className="w-3.5 h-3.5 text-indigo-500" />
+                                            ) : (
+                                              <Camera className="w-3.5 h-3.5 text-slate-400 group-hover:text-blue-600" />
+                                            )}
+                                          </div>
+                                          <div className="font-bold text-slate-900 text-xs truncate">
+                                            {cam.codigo}
+                                          </div>
+                                          <p className="text-[10px] text-slate-500 truncate font-sans">
+                                            {details}
+                                          </p>
+                                          {cam.direccion_ip && (
+                                            <span className="text-[9px] font-mono text-slate-600 bg-slate-100 px-1 rounded block truncate">
+                                              IP: {cam.direccion_ip}
+                                            </span>
+                                          )}
                                         </div>
-                                        <div className="font-bold text-slate-900 text-xs truncate">
-                                          {cam.codigo}
-                                        </div>
-                                        <p className="text-[10px] text-slate-500 truncate font-sans">
-                                          {details}
-                                        </p>
-                                        {cam.direccion_ip && (
-                                          <span className="text-[9px] font-mono text-slate-600 bg-slate-100 px-1 rounded block truncate">
-                                            IP: {cam.direccion_ip}
-                                          </span>
-                                        )}
-                                      </div>
-                                    ))}
+                                      );
+                                    })}
                                   </div>
                                 )}
                               </td>

@@ -23,7 +23,7 @@ import {
   HardDrive
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Camara, Equipo, Rack, Piso, Edificio, Campus, Sede, Proveedor } from '../types/database';
+import { Camara, Equipo, Rack, Piso, Edificio, Campus, Sede, Proveedor, PuntoRed } from '../types/database';
 import { calculateEquipmentOccupancy, getOccupancyStatus, EquipmentOccupancyInfo } from '../utils/occupancyAlerts';
 
 interface InventoryItem {
@@ -64,6 +64,8 @@ export const InventoryList: React.FC<InventoryListProps> = ({
 }) => {
   const [camaras, setCamaras] = useState<Camara[]>([]);
   const [equipos, setEquipos] = useState<Equipo[]>([]);
+  const [puntosRed, setPuntosRed] = useState<PuntoRed[]>([]);
+  const [switchPortsOccupancy, setSwitchPortsOccupancy] = useState<any[]>([]);
   const [racks, setRacks] = useState<Rack[]>([]);
   const [pisos, setPisos] = useState<Piso[]>([]);
   const [edificios, setEdificios] = useState<Edificio[]>([]);
@@ -106,6 +108,8 @@ export const InventoryList: React.FC<InventoryListProps> = ({
       const [
         { data: camData },
         { data: eqData },
+        { data: puntosData },
+        { data: spData },
         { data: rData },
         { data: pData },
         { data: edData },
@@ -115,6 +119,8 @@ export const InventoryList: React.FC<InventoryListProps> = ({
       ] = await Promise.all([
         supabase.from('camaras').select('*').order('codigo'),
         supabase.from('equipos').select('*').order('codigo'),
+        supabase.from('puntos_red').select('*').or('estado_ciclo_vida.is.null,estado_ciclo_vida.eq.instalado'),
+        supabase.from('v_puertos_switch_ocupacion').select('*'),
         supabase.from('racks').select('*'),
         supabase.from('pisos').select('*'),
         supabase.from('edificios').select('*'),
@@ -125,6 +131,8 @@ export const InventoryList: React.FC<InventoryListProps> = ({
 
       setCamaras(camData || []);
       setEquipos(eqData || []);
+      setPuntosRed(puntosData || []);
+      setSwitchPortsOccupancy(spData || []);
       setRacks(rData || []);
       setPisos(pData || []);
       setEdificios(edData || []);
@@ -154,10 +162,16 @@ export const InventoryList: React.FC<InventoryListProps> = ({
   const equipmentOccupancyMap = useMemo(() => {
     const map: Record<string, EquipmentOccupancyInfo> = {};
     equipos.forEach(eq => {
-      map[eq.id] = calculateEquipmentOccupancy(eq, camaras, nvrUplinks);
+      map[eq.id] = calculateEquipmentOccupancy(
+        eq, 
+        camaras, 
+        nvrUplinks, 
+        puntosRed, 
+        switchPortsOccupancy
+      );
     });
     return map;
-  }, [equipos, camaras, nvrUplinks]);
+  }, [equipos, camaras, nvrUplinks, puntosRed, switchPortsOccupancy]);
 
   // Transform both cameras and equipment into a unified list
   const unifiedInventory: InventoryItem[] = useMemo(() => {
@@ -979,17 +993,19 @@ export const InventoryList: React.FC<InventoryListProps> = ({
                             </div>
                           </div>
 
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedConnectedEquipo(null);
-                              onSelectCamera(conn.camera);
-                            }}
-                            className="px-2.5 py-1 bg-white hover:bg-blue-50 text-blue-700 border border-blue-200 rounded text-[10px] font-semibold flex items-center gap-1 transition-colors shrink-0 ml-2 cursor-pointer"
-                          >
-                            <Camera className="w-3 h-3 text-blue-600" />
-                            <span>Ver Ficha</span>
-                          </button>
+                          {conn.camera?.tipo_dispositivo !== 'punto_red' && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedConnectedEquipo(null);
+                                onSelectCamera(conn.camera);
+                              }}
+                              className="px-2.5 py-1 bg-white hover:bg-blue-50 text-blue-700 border border-blue-200 rounded text-[10px] font-semibold flex items-center gap-1 transition-colors shrink-0 ml-2 cursor-pointer"
+                            >
+                              <Camera className="w-3 h-3 text-blue-600" />
+                              <span>Ver Ficha</span>
+                            </button>
+                          )}
                         </div>
                       ))}
                     </div>

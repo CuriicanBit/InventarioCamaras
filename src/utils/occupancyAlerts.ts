@@ -1,4 +1,4 @@
-import { Equipo, Camara } from '../types/database';
+import { Equipo, Camara, PuntoRed } from '../types/database';
 import { parseSwitchPortNumber } from '../components/PatchPanelPortMap';
 
 export type OccupancyStatus = 'optimo' | 'alerta' | 'critico';
@@ -87,12 +87,19 @@ export function getOccupancyStatus(percentage: number): {
 }
 
 /**
- * Calculates equipment capacity, occupancy, connected cameras/uplinks, and alert status
+ * Calculates equipment capacity, occupancy, connected devices/uplinks, and alert status.
+ * CRITERIO ESTRICTO DE "OCUPADO" FÍSICO:
+ * - Switch: Sólo cuenta si existe una cámara (camaras con switch_id+puerto) O un punto de red
+ *   (puntos_red con puerto_switch_id o switch_id) conectado. La configuración de VLAN o Uso NO cuenta como ocupado.
+ * - Patch Panel: Conexión física con cámara (patch_panel_id+puerto) o punto de red (patch_panel_id+puerto).
+ * - NVR: Canales con cámaras asignadas.
  */
 export function calculateEquipmentOccupancy(
   equipo: Equipo,
   camaras: Camara[],
-  nvrUplinks?: Record<string, any>
+  nvrUplinks?: Record<string, any>,
+  puntosRed?: PuntoRed[],
+  switchPortsOccupancy?: any[] // Filas de v_puertos_switch_ocupacion
 ): EquipmentOccupancyInfo {
   const isSwitch = equipo.tipo === 'switch';
   const isPatchPanel = equipo.tipo === 'patch_panel';
@@ -115,38 +122,112 @@ export function calculateEquipmentOccupancy(
 
   const occupiedPortSet = new Set<string>();
 
-  camaras.forEach(cam => {
-    if (isSwitch && cam.switch_id === equipo.id) {
-      const portNum = parseSwitchPortNumber(cam.puerto_switch);
-      const portLabel = cam.puerto_switch || (portNum ? `P${portNum}` : 'P?');
-      occupiedPortSet.add(String(portNum ?? portLabel));
-      connectedCameras.push({
-        camera: cam,
-        portOrChannel: portLabel,
-        details: `Cámara ${cam.codigo} (${cam.modelo || cam.tipo_dispositivo || 'CCTV'})${cam.direccion_ip ? ` · IP ${cam.direccion_ip}` : ''}`
-      });
-    } else if (isPatchPanel && cam.patch_panel_id === equipo.id) {
-      const portNum = cam.puerto_patch;
-      if (portNum) {
-        occupiedPortSet.add(String(portNum));
+  if (isSwitch) {
+    // Si disponemos de filas de v_puertos_switch_ocupacion para este switch, usamos directamente esa vista
+    const portsForThisSwitch = switchPortsOccupancy?.filter(p => p.switch_id === equipo.id) || [];
+    if (portsForThisSwitch.length > 0) {
+      const rj45Ports = portsForThisSwitch.filter(p => p.tipo_puerto === 'rj45');
+      if (rj45Ports.length > 0) {
+        totalCapacity = rj45Ports.length;
       }
-      connectedCameras.push({
-        camera: cam,
-        portOrChannel: portNum ? `P${portNum}` : 'P?',
-        details: `Cámara ${cam.codigo} (${cam.modelo || 'CCTV'})${cam.switch_id ? ' · Cruzada a Switch' : ''}`
+
+      rj45Ports.forEach(port => {
+        // Criterio exacto: sólo ocupado si tiene ocupado_por_tipo u ocupado_por_codigo
+        const isOccupied = Boolean(port.ocupado_por_tipo || port.ocupado_por_codigo);
+        if (isOccupied) {
+          occupiedPortSet.add(String(port.numero_puerto));
+          const isCam = port.ocupado_por_tipo === 'camara';
+          connectedCameras.push({
+            camera: {
+              id: port.puerto_switch_id,
+              codigo: port.ocupado_por_codigo || `Pto ${port.numero_puerto}`,
+              modelo: isCam ? 'CCTV' : 'Punto de Red',
+              tipo_dispositivo: isCam ? 'camara' : 'punto_red',
+            } as any,
+            portOrChannel: `P${port.numero_puerto}`,
+            details: isCam
+              ? `Cámara ${port.ocupado_por_codigo} (CCTV)`
+              : `Punto de Red ${port.ocupado_por_codigo} (${port.uso || 'Datos'})`
+          });
+        }
       });
-    } else if (isNvr && cam.nvr_id === equipo.id) {
-      const chNum = cam.canal_nvr;
-      if (chNum) {
-        occupiedPortSet.add(String(chNum));
-      }
-      connectedCameras.push({
-        camera: cam,
-        portOrChannel: chNum ? `CH ${chNum}` : 'CH ?',
-        details: `Cámara ${cam.codigo} (${cam.modelo || 'CCTV'})${cam.direccion_ip ? ` · ${cam.direccion_ip}` : ''}`
+    } else {
+      // Cálculo directo cruzando camaras y puntos_red
+      camaras.forEach(cam => {
+        if (cam.switch_id === equipo.id) {
+          const portNum = parseSwitchPortNumber(cam.puerto_switch);
+          const portLabel = cam.puerto_switch || (portNum ? `P${portNum}` : 'P?');
+          occupiedPortSet.add(String(portNum ?? portLabel));
+          connectedCameras.push({
+            camera: cam,
+            portOrChannel: portLabel,
+            details: `Cámara ${cam.codigo} (${cam.modelo || cam.tipo_dispositivo || 'CCTV'})${cam.direccion_ip ? ` · IP ${cam.direccion_ip}` : ''}`
+          });
+        }
+      });
+
+      puntosRed?.forEach(pr => {
+        if (pr.switch_id === equipo.id || pr.puerto_switch_id) {
+          const portKey = pr.puerto_switch_id || pr.codigo;
+          occupiedPortSet.add(String(portKey));
+          connectedCameras.push({
+            camera: {
+              id: pr.id,
+              codigo: pr.codigo,
+              modelo: pr.tipo_punto,
+              tipo_dispositivo: 'punto_red',
+            } as any,
+            portOrChannel: pr.codigo,
+            details: `Punto de Red ${pr.codigo} (${pr.tipo_punto || 'Datos'})`
+          });
+        }
       });
     }
-  });
+  } else if (isPatchPanel) {
+    camaras.forEach(cam => {
+      if (cam.patch_panel_id === equipo.id) {
+        const portNum = cam.puerto_patch;
+        if (portNum) {
+          occupiedPortSet.add(String(portNum));
+        }
+        connectedCameras.push({
+          camera: cam,
+          portOrChannel: portNum ? `P${portNum}` : 'P?',
+          details: `Cámara ${cam.codigo} (${cam.modelo || 'CCTV'})${cam.switch_id ? ' · Cruzada a Switch' : ''}`
+        });
+      }
+    });
+
+    puntosRed?.forEach(pr => {
+      if (pr.patch_panel_id === equipo.id && pr.puerto_patch) {
+        occupiedPortSet.add(String(pr.puerto_patch));
+        connectedCameras.push({
+          camera: {
+            id: pr.id,
+            codigo: pr.codigo,
+            modelo: pr.tipo_punto,
+            tipo_dispositivo: 'punto_red',
+          } as any,
+          portOrChannel: `P${pr.puerto_patch}`,
+          details: `Punto de Red ${pr.codigo} (${pr.tipo_punto || 'Datos'})`
+        });
+      }
+    });
+  } else if (isNvr) {
+    camaras.forEach(cam => {
+      if (cam.nvr_id === equipo.id) {
+        const chNum = cam.canal_nvr;
+        if (chNum) {
+          occupiedPortSet.add(String(chNum));
+        }
+        connectedCameras.push({
+          camera: cam,
+          portOrChannel: chNum ? `CH ${chNum}` : 'CH ?',
+          details: `Cámara ${cam.codigo} (${cam.modelo || 'CCTV'})${cam.direccion_ip ? ` · ${cam.direccion_ip}` : ''}`
+        });
+      }
+    });
+  }
 
   const connectedUplinks: {
     nvrId: string;

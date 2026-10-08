@@ -17,7 +17,8 @@ import {
   AlertCircle,
   Cable,
   AlignJustify,
-  Boxes
+  Boxes,
+  X
 } from 'lucide-react';
 import { Equipo, TipoEquipo } from '../types/database';
 import { inferUHeight, findFirstAvailableUSlot } from '../utils/rackUnits';
@@ -134,9 +135,13 @@ export const RackBodegaDrawer: React.FC<RackBodegaDrawerProps> = ({
   });
 
   return (
-    <div className="bg-white border border-slate-200 rounded-lg shadow-xs overflow-hidden flex flex-col font-mono text-xs">
+    <div
+      className={`fixed inset-y-0 right-0 z-50 w-full sm:w-[440px] md:w-[480px] bg-white shadow-2xl border-l border-slate-300 flex flex-col font-mono text-xs transition-transform duration-300 ease-in-out ${
+        isOpen ? 'translate-x-0' : 'translate-x-full pointer-events-none'
+      }`}
+    >
       {/* Top Header */}
-      <div className="p-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-2">
+      <div className="p-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-2 shrink-0">
         <div className="flex items-center gap-2">
           <div className="p-1.5 bg-amber-100 text-amber-800 rounded">
             <Archive className="w-4 h-4" />
@@ -158,10 +163,17 @@ export const RackBodegaDrawer: React.FC<RackBodegaDrawerProps> = ({
           <button
             onClick={onRefreshBodega}
             disabled={loadingBodega}
-            className="p-1 text-slate-500 hover:text-slate-800 hover:bg-slate-200 rounded transition-colors"
+            className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-200 rounded transition-colors cursor-pointer"
             title="Refrescar Bodega"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loadingBodega ? 'animate-spin' : ''}`} />
+          </button>
+          <button
+            onClick={onToggle}
+            className="p-1.5 text-slate-400 hover:text-slate-800 hover:bg-slate-200 rounded transition-colors cursor-pointer ml-1"
+            title="Cerrar Cajón de Bodega"
+          >
+            <X className="w-4 h-4" />
           </button>
         </div>
       </div>
@@ -235,7 +247,7 @@ export const RackBodegaDrawer: React.FC<RackBodegaDrawerProps> = ({
       </div>
 
       {/* Equipment List */}
-      <div className="p-3 space-y-2 max-h-[440px] overflow-y-auto">
+      <div className="p-3 space-y-2 flex-1 overflow-y-auto">
         {loadingBodega ? (
           <div className="py-8 flex flex-col items-center justify-center text-slate-400 gap-2">
             <RefreshCw className="w-5 h-5 animate-spin text-amber-500" />

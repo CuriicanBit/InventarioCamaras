@@ -106,6 +106,7 @@ export interface Equipo {
   fecha_instalacion: string | null;
   proveedor_instalacion_id: string | null;
   estado_ciclo_vida?: EstadoCicloVida | string;
+  rol_red?: 'acceso' | 'distribucion' | 'core' | string | null;
   u_range?: string | null;
   created_at: string;
   rack?: Rack;
@@ -114,6 +115,26 @@ export interface Equipo {
   proveedor_compra?: Proveedor;
   proveedor_instalacion?: Proveedor;
 }
+
+export type RolRedSwitch = 'acceso' | 'distribucion' | 'core';
+
+export const formatRolRed = (rol?: string | null): string => {
+  if (!rol) return '';
+  const clean = rol.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (clean === 'acceso') return 'Acceso';
+  if (clean === 'distribucion') return 'Distribución';
+  if (clean === 'core') return 'Core';
+  return rol;
+};
+
+export const normalizeRolRedForDb = (rol?: string | null): 'acceso' | 'distribucion' | 'core' | null => {
+  if (!rol) return null;
+  const clean = rol.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (clean === 'acceso') return 'acceso';
+  if (clean === 'distribucion') return 'distribucion';
+  if (clean === 'core') return 'core';
+  return null;
+};
 
 export type TipoCamara = 'domo' | 'bullet' | 'ptz' | 'fisheye' | 'multisensor';
 
@@ -204,6 +225,7 @@ export interface Vlan {
   nombre: string;
   color: string;
   descripcion?: string | null;
+  uso?: string | null;
   created_at: string;
 }
 
@@ -213,6 +235,8 @@ export interface EnlaceSwitch {
   puerto_destino_id: string;
   switch_origen_id: string;
   switch_destino_id: string;
+  es_principal?: boolean | null;
+  categoria_cable?: string | null;
   created_at: string;
   switch_origen?: Equipo;
   switch_destino?: Equipo;

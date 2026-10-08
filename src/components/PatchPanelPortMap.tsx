@@ -32,6 +32,7 @@ import {
 import { supabase } from '../lib/supabase';
 import { Rack, Equipo, Camara, Piso, Edificio, PuntoRed, PuertoSwitchOcupacion, Vlan } from '../types/database';
 import { getOccupancyStatus } from '../utils/occupancyAlerts';
+import { AsociarServicioDialog } from './AsociarServicioDialog';
 
 interface PatchPanelPortMapProps {
   rack?: Rack | null;
@@ -193,7 +194,7 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
   const [searchFilter, setSearchFilter] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [, setSavingAction] = useState(false);
+  const [savingAction, setSavingAction] = useState(false);
 
   // Drag & Drop / Visual connection state
   const [activeDrag, setActiveDrag] = useState<DragPayload | null>(null);
@@ -320,22 +321,26 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
       const swIds = loadedEquipos.filter(e => e.tipo === 'switch').map(s => s.id);
       const ppIds = loadedEquipos.filter(e => e.tipo === 'patch_panel').map(p => p.id);
 
-      const relevantPuntos = (puntosData || []).filter(
-        p => p.rack_id === currentRack.id || 
-             (p.patch_panel_id && ppIds.includes(p.patch_panel_id)) || 
-             (p.switch_id && swIds.includes(p.switch_id))
-      );
-      setPuntosRed(relevantPuntos);
-
+      let spDataLoaded: any[] = [];
       if (swIds.length > 0) {
         const { data: spData } = await supabase
           .from('v_puertos_switch_ocupacion')
           .select('*')
           .in('switch_id', swIds);
-        setSwitchPortsOccupation(spData || []);
+        spDataLoaded = spData || [];
+        setSwitchPortsOccupation(spDataLoaded);
       } else {
         setSwitchPortsOccupation([]);
       }
+
+      const spPuertoIds = new Set(spDataLoaded.map(s => s.puerto_switch_id));
+      const relevantPuntos = (puntosData || []).filter(
+        p => p.rack_id === currentRack.id || 
+             (p.patch_panel_id && ppIds.includes(p.patch_panel_id)) || 
+             (p.switch_id && swIds.includes(p.switch_id)) ||
+             (p.puerto_switch_id && spPuertoIds.has(p.puerto_switch_id))
+      );
+      setPuntosRed(relevantPuntos);
 
       const pMap: Record<string, Piso> = {};
       pisosData?.forEach(p => { pMap[p.id] = p; });
@@ -421,6 +426,7 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
   // Switch port VLAN lookup map (synced with vlans table)
   const switchPortVlanMap = useMemo(() => {
     const map: Record<string, {
+      vlan_id: string | null;
       vlan_numero: number | null;
       vlan_nombre: string | null;
       vlan_color: string | null;
@@ -433,6 +439,7 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
       const vlanObj = vlansList.find(v => v.id === (sp as any).vlan_id || v.numero === (sp.vlan_numero ?? sp.vlan));
       const key = makePortKey(sp.switch_id, sp.numero_puerto);
       map[key] = {
+        vlan_id: vlanObj?.id || (sp as any).vlan_id || null,
         vlan_numero: sp.vlan_numero ?? vlanObj?.numero ?? null,
         vlan_nombre: sp.vlan_nombre ?? vlanObj?.nombre ?? null,
         vlan_color: vlanObj?.color || sp.vlan_color || null,
@@ -519,11 +526,18 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
 
     // 2. Process Puntos de Red (Funcionario, Sala, WiFi AP, etc.)
     puntosRed.forEach((punto) => {
-      const tipoLabel = punto.tipo_punto === 'datos_funcionario'
-        ? 'Punto Funcionario'
-        : punto.tipo_punto === 'wifi_ap'
+      const isAlumno = punto.tipo_punto === 'datos_alumno' || 
+        punto.codigo.toLowerCase().includes('sala') || 
+        punto.codigo.toLowerCase().includes('alum');
+      const isWifi = punto.tipo_punto === 'wifi_ap' || 
+        punto.codigo.toLowerCase().includes('wifi') || 
+        punto.codigo.toLowerCase().includes('ap-');
+
+      const tipoLabel = isAlumno
+        ? 'Datos Alumno'
+        : isWifi
         ? 'WiFi AP'
-        : 'Punto de Sala';
+        : 'Datos Funcionario';
 
       const entity: PortEntity = {
         tipo: 'punto_red',
@@ -538,17 +552,21 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
       }
 
       let swNum: number | null = null;
+      let effectiveSwitchId: string | null = punto.switch_id;
       if (punto.puerto_switch_id) {
         const sp = switchPortsOccupation.find(s => s.puerto_switch_id === punto.puerto_switch_id);
-        if (sp) swNum = sp.numero_puerto;
+        if (sp) {
+          swNum = sp.numero_puerto;
+          if (!effectiveSwitchId) effectiveSwitchId = sp.switch_id;
+        }
       }
 
-      if (punto.switch_id && swNum !== null) {
-        const swKey = makePortKey(punto.switch_id, swNum);
+      if (effectiveSwitchId && swNum !== null) {
+        const swKey = makePortKey(effectiveSwitchId, swNum);
         swMap[swKey] = entity;
       }
 
-      if (punto.patch_panel_id && punto.puerto_patch && punto.switch_id && swNum !== null) {
+      if (punto.patch_panel_id && punto.puerto_patch && effectiveSwitchId && swNum !== null) {
         conns.push({
           id: `pr-${punto.id}`,
           tipo: 'punto_red',
@@ -557,7 +575,7 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
           subtitulo: tipoLabel,
           patchPanelId: punto.patch_panel_id,
           patchPort: punto.puerto_patch,
-          switchId: punto.switch_id,
+          switchId: effectiveSwitchId,
           switchPortNum: swNum,
           switchPortLabel: `Fa0/${swNum}`,
           color: CABLE_PALETTE[conns.length % CABLE_PALETTE.length],
@@ -828,8 +846,47 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
         : null
     );
 
-    const targetCamera = entity?.camara || conn?.camera || null;
-    const targetPunto = entity?.punto || conn?.puntoRed || null;
+    const spForClick = isPatch 
+      ? (conn ? switchPortsOccupation.find(s => s.switch_id === conn.switchId && s.numero_puerto === conn.switchPortNum) : null)
+      : switchPortsOccupation.find(s => s.switch_id === equipo.id && s.numero_puerto === portNum);
+
+    let targetCamera = entity?.camara || conn?.camera || null;
+    let targetPunto = entity?.punto || conn?.puntoRed || null;
+
+    if (!targetCamera && spForClick?.ocupado_por_codigo) {
+      targetCamera = camaras.find(c => c.codigo === spForClick.ocupado_por_codigo) || null;
+    }
+    if (!targetPunto && spForClick?.ocupado_por_codigo) {
+      targetPunto = puntosRed.find(p => p.codigo === spForClick.ocupado_por_codigo) || null;
+    }
+
+    if (!targetCamera && !targetPunto && spForClick && (spForClick.ocupado_por_codigo || (spForClick.uso && spForClick.uso !== 'Libre') || spForClick.vlan_numero)) {
+      const isAlum = spForClick.vlan_numero === 30 || spForClick.uso?.toLowerCase().includes('alumno') || spForClick.uso?.toLowerCase().includes('sala');
+      const isWifi = spForClick.vlan_numero === 40 || spForClick.uso?.toLowerCase().includes('wifi');
+      targetPunto = {
+        id: `synth-${equipo.id}-${portNum}`,
+        codigo: spForClick.ocupado_por_codigo || (isAlum ? `P-ALUMNO-${portNum}` : isWifi ? `AP-WIFI-${portNum}` : `P-FUNC-${portNum}`),
+        tipo_punto: isAlum ? 'datos_alumno' : isWifi ? 'wifi_ap' : 'datos_funcionario',
+        ubicacion_especifica: `Puerto ${portNum} en ${equipo.codigo}`,
+        piso_id: null,
+        rack_id: currentRack?.id || null,
+        patch_panel_id: isPatch ? equipo.id : null,
+        puerto_patch: isPatch ? portNum : null,
+        switch_id: !isPatch ? equipo.id : null,
+        puerto_switch_id: spForClick.puerto_switch_id || null,
+        categoria_cable: 'cat6',
+        marca_id: null,
+        modelo_id: null,
+        numero_serie: null,
+        direccion_mac: null,
+        direccion_ip: null,
+        fecha_compra: null,
+        proveedor_compra_id: null,
+        fecha_instalacion: null,
+        proveedor_instalacion_id: null,
+        created_at: new Date().toISOString()
+      };
+    }
 
     if (selectedPort?.equipoId === equipo.id && selectedPort?.portNum === portNum) {
       setSelectedPort(null);
@@ -1643,49 +1700,115 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
       }
     }
 
+    const sp = isSwitch 
+      ? switchPortsOccupation.find(s => s.switch_id === eq.id && s.numero_puerto === pNum)
+      : (conn 
+          ? switchPortsOccupation.find(s => s.switch_id === conn.switchId && s.numero_puerto === conn.switchPortNum)
+          : (entity?.punto?.puerto_switch_id 
+              ? switchPortsOccupation.find(s => s.puerto_switch_id === entity.punto?.puerto_switch_id) 
+              : null));
+
+    if (!swVlan && sp?.vlan_numero) {
+      const vlanObj = vlansList.find(v => v.numero === sp.vlan_numero);
+      swVlan = {
+        vlan_id: vlanObj?.id || (sp as any).vlan_id || null,
+        vlan_numero: sp.vlan_numero,
+        vlan_nombre: sp.vlan_nombre || vlanObj?.nombre || `VLAN ${sp.vlan_numero}`,
+        vlan_color: sp.vlan_color || vlanObj?.color || '#3b82f6',
+        uso: sp.uso || '',
+        puerto_switch_id: sp.puerto_switch_id || '',
+        tipo_puerto: sp.tipo_puerto || 'rj45'
+      };
+    }
+
     const hasVlan = Boolean(swVlan?.vlan_numero);
     const hasVlanColor = Boolean(swVlan?.vlan_color);
     const isColoredByVlan = isOccupied && hasVlan && hasVlanColor;
 
     // Determinar qué tipo de ocupante tiene (cámara, datos funcionario, datos alumno, wifi ap, nvr)
+    const pto = entity?.punto || conn?.puntoRed;
+    const isCamera = Boolean(
+      entity?.tipo === 'camara' || 
+      conn?.tipo === 'camara' || 
+      entity?.camara || 
+      conn?.camera || 
+      sp?.ocupado_por_tipo === 'camara' || 
+      (sp?.uso && sp.uso.toLowerCase().includes('cctv')) || 
+      swVlan?.vlan_numero === 10 || 
+      (swVlan?.vlan_nombre && swVlan.vlan_nombre.toLowerCase().includes('cctv'))
+    );
+
+    const isWifi = Boolean(
+      pto?.tipo_punto === 'wifi_ap' || 
+      (sp?.uso && sp.uso.toLowerCase().includes('wifi')) || 
+      swVlan?.vlan_numero === 40 || 
+      (swVlan?.vlan_nombre && swVlan.vlan_nombre.toLowerCase().includes('wifi')) ||
+      (pto?.codigo && (pto.codigo.toLowerCase().includes('wifi') || pto.codigo.toLowerCase().includes('ap-'))) ||
+      (sp?.ocupado_por_codigo && (sp.ocupado_por_codigo.toLowerCase().includes('wifi') || sp.ocupado_por_codigo.toLowerCase().includes('ap-')))
+    );
+
+    // Alumno / Estudiante / Sala (identificado por VLAN 30, tipo_punto datos_alumno, uso Datos Alumno, o código de sala/alumno)
+    const isAlumno = Boolean(
+      pto?.tipo_punto === 'datos_alumno' || 
+      swVlan?.vlan_numero === 30 || 
+      (swVlan?.vlan_nombre && (swVlan.vlan_nombre.toLowerCase().includes('alumno') || swVlan.vlan_nombre.toLowerCase().includes('sala'))) ||
+      (sp?.uso && (sp.uso.toLowerCase().includes('alumno') || sp.uso.toLowerCase().includes('sala'))) || 
+      (pto?.codigo && (pto.codigo.toLowerCase().includes('sala') || pto.codigo.toLowerCase().includes('alum'))) ||
+      (sp?.ocupado_por_codigo && (sp.ocupado_por_codigo.toLowerCase().includes('sala') || sp.ocupado_por_codigo.toLowerCase().includes('alum')))
+    );
+
+    // Funcionario / Personal / Administrativo (identificado por VLAN 20, tipo_punto datos_funcionario, uso Datos Funcionario, o código func)
+    const isFuncionario = Boolean(
+      pto?.tipo_punto === 'datos_funcionario' || 
+      swVlan?.vlan_numero === 20 || 
+      (swVlan?.vlan_nombre && (swVlan.vlan_nombre.toLowerCase().includes('funcionario') || swVlan.vlan_nombre.toLowerCase().includes('personal') || swVlan.vlan_nombre.toLowerCase().includes('docente'))) ||
+      (sp?.uso && (sp.uso.toLowerCase().includes('funcionario') || sp.uso.toLowerCase().includes('personal') || sp.uso.toLowerCase().includes('docente'))) || 
+      (pto?.codigo && pto.codigo.toLowerCase().includes('func')) ||
+      (sp?.ocupado_por_codigo && sp.ocupado_por_codigo.toLowerCase().includes('func'))
+    );
+
     let occupantType: 'camara' | 'datos_funcionario' | 'datos_alumno' | 'wifi_ap' | 'nvr' | null = null;
     let occupantLabel = 'Libre';
 
     if (nvrUplink) {
       occupantType = 'nvr';
       occupantLabel = 'Uplink NVR';
-    } else if (entity?.tipo === 'camara' || conn?.tipo === 'camara' || entity?.camara || conn?.camera) {
+    } else if (isCamera) {
       occupantType = 'camara';
       occupantLabel = 'Cámara CCTV';
-    } else if (entity?.punto || conn?.puntoRed) {
-      const pto = entity?.punto || conn?.puntoRed;
-      if (pto?.tipo_punto === 'datos_funcionario') {
-        occupantType = 'datos_funcionario';
-        occupantLabel = 'Datos Funcionario';
-      } else if (pto?.tipo_punto === 'datos_alumno') {
+    } else if (isWifi) {
+      occupantType = 'wifi_ap';
+      occupantLabel = 'AP WiFi';
+    } else if (isAlumno) {
+      occupantType = 'datos_alumno';
+      occupantLabel = 'Datos Alumno';
+    } else if (isFuncionario) {
+      occupantType = 'datos_funcionario';
+      occupantLabel = 'Datos Funcionario';
+    } else if (pto || (sp && sp.ocupado_por_tipo === 'punto_red')) {
+      if (swVlan?.vlan_numero === 30 || (swVlan?.vlan_nombre && swVlan.vlan_nombre.toLowerCase().includes('alumno'))) {
         occupantType = 'datos_alumno';
         occupantLabel = 'Datos Alumno';
-      } else if (pto?.tipo_punto === 'wifi_ap') {
+      } else if (swVlan?.vlan_numero === 40 || (swVlan?.vlan_nombre && swVlan.vlan_nombre.toLowerCase().includes('wifi'))) {
         occupantType = 'wifi_ap';
         occupantLabel = 'AP WiFi';
       } else {
         occupantType = 'datos_funcionario';
-        occupantLabel = 'Punto de Red';
+        occupantLabel = 'Datos Funcionario';
       }
-    } else if (isSwitch) {
-      const sp = switchPortsOccupation.find(s => s.switch_id === eq.id && s.numero_puerto === pNum);
-      if (sp?.ocupado_por_tipo === 'camara' || sp?.uso === 'CCTV') {
-        occupantType = 'camara';
-        occupantLabel = 'Cámara CCTV';
-      } else if (sp?.uso === 'WiFi AP') {
-        occupantType = 'wifi_ap';
-        occupantLabel = 'AP WiFi';
-      } else if (sp?.uso === 'Datos Alumno') {
+    } else if (isSwitch && sp && (sp.ocupado_por_codigo || (sp.uso && sp.uso.trim() !== '' && sp.uso.trim() !== 'Libre'))) {
+      if (sp.uso?.toLowerCase().includes('alumno') || swVlan?.vlan_numero === 30 || (swVlan?.vlan_nombre && swVlan.vlan_nombre.toLowerCase().includes('alumno'))) {
         occupantType = 'datos_alumno';
         occupantLabel = 'Datos Alumno';
-      } else if (sp?.ocupado_por_tipo === 'punto_red' || sp?.uso === 'Datos Funcionario') {
+      } else if (sp.uso?.toLowerCase().includes('wifi') || swVlan?.vlan_numero === 40) {
+        occupantType = 'wifi_ap';
+        occupantLabel = 'AP WiFi';
+      } else if (sp.uso?.toLowerCase().includes('cctv') || swVlan?.vlan_numero === 10) {
+        occupantType = 'camara';
+        occupantLabel = 'Cámara CCTV';
+      } else {
         occupantType = 'datos_funcionario';
-        occupantLabel = 'Datos Funcionario';
+        occupantLabel = sp.uso || 'Datos Funcionario';
       }
     }
 
@@ -1694,10 +1817,12 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
     if (isColoredByVlan) {
       if (occupantType === 'camara') {
         occupantIcon = <Camera className="w-3.5 h-3.5 shrink-0" style={{ color: swVlan?.vlan_color || '#38bdf8' }} />;
-      } else if (occupantType === 'datos_funcionario') {
-        occupantIcon = <Briefcase className="w-3.5 h-3.5 shrink-0" style={{ color: swVlan?.vlan_color || '#60a5fa' }} />;
       } else if (occupantType === 'datos_alumno') {
+        // BIRRETE PARA PUERTOS DE ALUMNOS (con el color de su VLAN a fin, ej. verde #34d399 / #059669)
         occupantIcon = <GraduationCap className="w-3.5 h-3.5 shrink-0" style={{ color: swVlan?.vlan_color || '#34d399' }} />;
+      } else if (occupantType === 'datos_funcionario') {
+        // MALETÍN PARA PUERTOS DE FUNCIONARIOS (con el color de su VLAN a fin, ej. cian #60a5fa / #0891b2)
+        occupantIcon = <Briefcase className="w-3.5 h-3.5 shrink-0" style={{ color: swVlan?.vlan_color || '#60a5fa' }} />;
       } else if (occupantType === 'wifi_ap') {
         occupantIcon = <Wifi className="w-3.5 h-3.5 shrink-0" style={{ color: swVlan?.vlan_color || '#818cf8' }} />;
       } else if (occupantType === 'nvr') {
@@ -1716,9 +1841,10 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
       displayCode = entity.codigo.length > 7 ? entity.codigo.replace('CAM-ENG-P2-', 'C-') : entity.codigo;
     } else if (conn?.codigo) {
       displayCode = conn.codigo.length > 7 ? conn.codigo.replace('CAM-ENG-P2-', 'C-') : conn.codigo;
-    } else if (isSwitch) {
-      const sp = switchPortsOccupation.find(s => s.switch_id === eq.id && s.numero_puerto === pNum);
-      if (sp?.ocupado_por_codigo) displayCode = sp.ocupado_por_codigo;
+    } else if (isSwitch && sp?.ocupado_por_codigo) {
+      displayCode = sp.ocupado_por_codigo;
+    } else if (isSwitch && sp?.uso && sp.uso.trim() !== '' && sp.uso.trim() !== 'Libre') {
+      displayCode = isAlumno ? 'ALUMNO' : isWifi ? 'AP-WIFI' : isFuncionario ? 'FUNC' : sp.uso;
     }
 
     const matchesVlanFilter = selectedVlanFilter !== null && swVlan?.vlan_numero === selectedVlanFilter;
@@ -3455,440 +3581,74 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
         )}
       </div>
 
-      {/* MULTI-SERVICE CROSS-CONNECT ASSIGN MODAL (Puntos de Red: Funcionario / Sala / AP, Cámaras CCTV, o Enlace Directo) */}
+      {/* MULTI-SERVICE CROSS-CONNECT ASSIGN MODAL (AsociarServicioDialog) */}
       {assignModal && assignModal.isOpen && (() => {
         const pp = equipos.find(e => e.id === assignModal.patchPanelId);
         const sw = equipos.find(e => e.id === assignModal.switchId);
         const swVlanInfo = switchPortVlanMap[makePortKey(assignModal.switchId, assignModal.switchPort)];
 
-        const filteredPuntos = puntosRed.filter(p => {
-          if (!puntoSearchQuery.trim()) return true;
-          const q = puntoSearchQuery.toLowerCase();
-          return (
-            p.codigo.toLowerCase().includes(q) ||
-            (p.ubicacion_especifica && p.ubicacion_especifica.toLowerCase().includes(q)) ||
-            p.tipo_punto.toLowerCase().includes(q)
-          );
-        });
-
-        const filteredCamaras = camaras.filter(c => {
-          if (!camaraSearchQuery.trim()) return true;
-          const q = camaraSearchQuery.toLowerCase();
-          return (
-            c.codigo.toLowerCase().includes(q) ||
-            (c.marca && c.marca.toLowerCase().includes(q)) ||
-            (c.modelo && c.modelo.toLowerCase().includes(q)) ||
-            (c.direccion_ip && c.direccion_ip.toLowerCase().includes(q))
-          );
-        });
-
         return (
-          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-            <div className="bg-white rounded-xl shadow-2xl border border-slate-200 max-w-xl w-full p-5 space-y-4 animate-in fade-in zoom-in-95 duration-150">
-              {/* Modal Header */}
-              <div className="flex items-start justify-between border-b border-slate-100 pb-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="p-2 bg-blue-50 text-blue-600 rounded-lg border border-blue-200">
-                    <Cable className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="font-mono font-bold text-sm text-slate-900">
-                      Asociar Servicio al Enlace Cross-Connect
-                    </h3>
-                    <p className="text-[11px] text-slate-500 font-mono mt-0.5">
-                      {pp?.codigo} [P{String(assignModal.patchPort).padStart(2, '0')}] ───&gt; {sw?.codigo} [P{String(assignModal.switchPort).padStart(2, '0')}]
-                    </p>
-                  </div>
-                </div>
-                <button 
-                  onClick={() => setAssignModal(null)}
-                  className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-
-              {/* VLAN Context Bar of Target Switch Port */}
-              {swVlanInfo?.vlan_numero && (
-                <div 
-                  className="p-2.5 rounded-lg border flex items-center justify-between text-xs font-mono"
-                  style={{
-                    backgroundColor: `${swVlanInfo.vlan_color || '#3b82f6'}12`,
-                    borderColor: `${swVlanInfo.vlan_color || '#3b82f6'}40`
-                  }}
-                >
-                  <div className="flex items-center gap-2">
-                    <span 
-                      className="w-2.5 h-2.5 rounded-full shrink-0" 
-                      style={{ backgroundColor: swVlanInfo.vlan_color || '#3b82f6' }} 
-                    />
-                    <span className="font-bold text-slate-800">
-                      Puerto Switch en VLAN {swVlanInfo.vlan_numero} {swVlanInfo.vlan_nombre ? `(${swVlanInfo.vlan_nombre})` : ''}
-                    </span>
-                  </div>
-                  {swVlanInfo.uso && (
-                    <span className="text-[10px] px-2 py-0.5 bg-white rounded border border-slate-200 text-slate-700 font-semibold">
-                      Uso: {swVlanInfo.uso}
-                    </span>
-                  )}
-                </div>
-              )}
-
-              {/* Main Service Selector Tabs */}
-              <div className="flex rounded-lg bg-slate-100 p-1 border border-slate-200 text-xs font-mono">
-                <button
-                  type="button"
-                  onClick={() => setAssignModal(prev => prev ? { ...prev, activeTab: 'punto_red' } : null)}
-                  className={`flex-1 py-1.5 px-2 rounded-md font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                    assignModal.activeTab === 'punto_red'
-                      ? 'bg-white text-blue-700 shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  <Network className="w-3.5 h-3.5 text-blue-500" />
-                  <span>Punto de Red (Sala / Funcionario)</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setAssignModal(prev => prev ? { ...prev, activeTab: 'camara' } : null)}
-                  className={`flex-1 py-1.5 px-2 rounded-md font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                    assignModal.activeTab === 'camara'
-                      ? 'bg-white text-blue-700 shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  <Camera className="w-3.5 h-3.5 text-blue-500" />
-                  <span>Cámara CCTV</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setAssignModal(prev => prev ? { ...prev, activeTab: 'directo' } : null)}
-                  className={`py-1.5 px-3 rounded-md font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                    assignModal.activeTab === 'directo'
-                      ? 'bg-white text-slate-800 shadow-xs'
-                      : 'text-slate-500 hover:text-slate-800'
-                  }`}
-                >
-                  <Cable className="w-3.5 h-3.5" />
-                  <span>Solo Cable</span>
-                </button>
-              </div>
-
-              {/* TAB 1: PUNTOS DE RED (FUNCIONARIOS, SALA, WIFI AP) */}
-              {assignModal.activeTab === 'punto_red' && (
-                <div className="space-y-3">
-                  {/* Subtabs: Nuevo Punto vs Existente */}
-                  <div className="flex items-center justify-between border-b border-slate-200 pb-2">
-                    <span className="text-[11px] font-mono text-slate-500 uppercase font-semibold">
-                      Modalidad de Asignación:
-                    </span>
-                    <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => setAssignModal(prev => prev ? { ...prev, subTab: 'nuevo' } : null)}
-                        className={`px-2.5 py-1 text-xs rounded font-mono font-bold transition-all cursor-pointer ${
-                          assignModal.subTab === 'nuevo'
-                            ? 'bg-blue-600 text-white shadow-2xs'
-                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                        }`}
-                      >
-                        + Crear Nuevo Punto
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setAssignModal(prev => prev ? { ...prev, subTab: 'existente' } : null)}
-                        className={`px-2.5 py-1 text-xs rounded font-mono font-bold transition-all cursor-pointer ${
-                          assignModal.subTab === 'existente'
-                            ? 'bg-blue-600 text-white shadow-2xs'
-                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                        }`}
-                      >
-                        Punto Existente ({puntosRed.length})
-                      </button>
-                    </div>
-                  </div>
-
-                  {assignModal.subTab === 'nuevo' ? (
-                    /* FORM: CREAR NUEVO PUNTO DE RED */
-                    <div className="space-y-3 bg-slate-50 p-3.5 rounded-lg border border-slate-200 font-mono text-xs">
-                      {/* Tipo de Punto Selector */}
-                      <div>
-                        <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1.5">
-                          Tipo de Punto de Red:
-                        </label>
-                        <div className="grid grid-cols-3 gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setNuevoPuntoTipo('datos_funcionario');
-                              setNuevoPuntoCodigo(`PR-FUNC-P${String(assignModal.patchPort).padStart(2, '0')}`);
-                            }}
-                            className={`p-2 rounded border text-left flex flex-col items-center gap-1 transition-all cursor-pointer ${
-                              nuevoPuntoTipo === 'datos_funcionario'
-                                ? 'bg-cyan-50 border-cyan-500 text-cyan-900 ring-1 ring-cyan-500'
-                                : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-                            }`}
-                          >
-                            <Users className="w-4 h-4 text-cyan-600" />
-                            <span className="font-bold text-[10px] text-center">Funcionario</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setNuevoPuntoTipo('datos_alumno');
-                              setNuevoPuntoCodigo(`PR-SALA-P${String(assignModal.patchPort).padStart(2, '0')}`);
-                            }}
-                            className={`p-2 rounded border text-left flex flex-col items-center gap-1 transition-all cursor-pointer ${
-                              nuevoPuntoTipo === 'datos_alumno'
-                                ? 'bg-emerald-50 border-emerald-500 text-emerald-900 ring-1 ring-emerald-500'
-                                : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-                            }`}
-                          >
-                            <Laptop className="w-4 h-4 text-emerald-600" />
-                            <span className="font-bold text-[10px] text-center">Punto de Sala</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setNuevoPuntoTipo('wifi_ap');
-                              setNuevoPuntoCodigo(`AP-WIFI-P${String(assignModal.patchPort).padStart(2, '0')}`);
-                            }}
-                            className={`p-2 rounded border text-left flex flex-col items-center gap-1 transition-all cursor-pointer ${
-                              nuevoPuntoTipo === 'wifi_ap'
-                                ? 'bg-indigo-50 border-indigo-500 text-indigo-900 ring-1 ring-indigo-500'
-                                : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-                            }`}
-                          >
-                            <Wifi className="w-4 h-4 text-indigo-600" />
-                            <span className="font-bold text-[10px] text-center">WiFi AP</span>
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Código Input */}
-                      <div>
-                        <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1">
-                          Código Identificador:
-                        </label>
-                        <input
-                          type="text"
-                          value={nuevoPuntoCodigo}
-                          onChange={(e) => setNuevoPuntoCodigo(e.target.value.toUpperCase())}
-                          placeholder="ej. PR-FUNC-101, PR-SALA-202"
-                          className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white font-mono font-bold text-slate-900 text-xs focus:ring-1 focus:ring-blue-500 uppercase"
-                        />
-                      </div>
-
-                      {/* Ubicación Input */}
-                      <div>
-                        <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1">
-                          Ubicación Específica en Terreno (Opcional):
-                        </label>
-                        <input
-                          type="text"
-                          value={nuevoPuntoUbicacion}
-                          onChange={(e) => setNuevoPuntoUbicacion(e.target.value)}
-                          placeholder="ej. Sala de Profesores, Puesto 04 Admisión, Laboratorio 2"
-                          className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white font-sans text-xs focus:ring-1 focus:ring-blue-500"
-                        />
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          if (!nuevoPuntoCodigo.trim()) {
-                            showToast('Por favor ingrese un código para el punto de red', 'error');
-                            return;
-                          }
-                          await handleCreateAndConnectNuevoPuntoRed(
-                            assignModal.patchPanelId,
-                            assignModal.patchPort,
-                            assignModal.switchId,
-                            assignModal.switchPort,
-                            nuevoPuntoCodigo,
-                            nuevoPuntoTipo,
-                            nuevoPuntoUbicacion
-                          );
-                          setAssignModal(null);
-                        }}
-                        className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition-colors cursor-pointer"
-                      >
-                        <Plus className="w-4 h-4" />
-                        <span>Crear Punto y Conectar Enlace</span>
-                      </button>
-                    </div>
-                  ) : (
-                    /* LIST: SELECCIONAR PUNTO EXISTENTE */
-                    <div className="space-y-2">
-                      <div className="relative">
-                        <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
-                        <input
-                          type="text"
-                          placeholder="Filtrar por código, ubicación..."
-                          value={puntoSearchQuery}
-                          onChange={(e) => setPuntoSearchQuery(e.target.value)}
-                          className="w-full pl-8 pr-3 py-1.5 border border-slate-300 rounded text-xs bg-white font-sans"
-                        />
-                      </div>
-
-                      <div className="max-h-56 overflow-y-auto space-y-1.5 border border-slate-200 rounded-lg p-2 bg-slate-50/50">
-                        {filteredPuntos.length === 0 ? (
-                          <div className="p-4 text-center text-slate-500 text-xs font-sans">
-                            No se encontraron puntos de red disponibles.
-                          </div>
-                        ) : (
-                          filteredPuntos.map(p => {
-                            const isAlreadyPatched = Boolean(p.patch_panel_id && p.puerto_patch && p.switch_id);
-                            const tipoLabel = p.tipo_punto === 'datos_funcionario'
-                              ? 'Funcionario'
-                              : p.tipo_punto === 'wifi_ap'
-                              ? 'WiFi AP'
-                              : 'Punto de Sala';
-                            return (
-                              <button
-                                key={p.id}
-                                onClick={async () => {
-                                  await handleCreateOrUpdateConnection(
-                                    assignModal.patchPanelId,
-                                    assignModal.patchPort,
-                                    assignModal.switchId,
-                                    assignModal.switchPort,
-                                    undefined,
-                                    p.id
-                                  );
-                                  setAssignModal(null);
-                                }}
-                                className="w-full text-left p-2.5 rounded border border-slate-200 hover:border-cyan-400 bg-white hover:bg-cyan-50/40 transition-all flex items-center justify-between cursor-pointer"
-                              >
-                                <div>
-                                  <div className="flex items-center gap-1.5 font-mono font-bold text-xs text-slate-900">
-                                    <span>{p.codigo}</span>
-                                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-700 font-semibold border border-slate-200">
-                                      {tipoLabel}
-                                    </span>
-                                  </div>
-                                  <div className="text-[10px] text-slate-500 font-sans mt-0.5">
-                                    {p.ubicacion_especifica || 'Sin ubicación específica'}
-                                  </div>
-                                </div>
-                                <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold ${
-                                  isAlreadyPatched 
-                                    ? 'bg-amber-100 text-amber-800' 
-                                    : 'bg-emerald-100 text-emerald-800'
-                                }`}>
-                                  {isAlreadyPatched ? 'Reasignar' : 'Conectar'}
-                                </span>
-                              </button>
-                            );
-                          })
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* TAB 2: CÁMARAS CCTV */}
-              {assignModal.activeTab === 'camara' && (
-                <div className="space-y-2">
-                  <div className="relative">
-                    <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
-                    <input
-                      type="text"
-                      placeholder="Buscar por código de cámara, IP, modelo..."
-                      value={camaraSearchQuery}
-                      onChange={(e) => setCamaraSearchQuery(e.target.value)}
-                      className="w-full pl-8 pr-3 py-1.5 border border-slate-300 rounded text-xs bg-white font-sans"
-                    />
-                  </div>
-
-                  <div className="max-h-60 overflow-y-auto space-y-1.5 border border-slate-200 rounded-lg p-2 bg-slate-50/50">
-                    {filteredCamaras.length === 0 ? (
-                      <div className="p-4 text-center text-slate-500 text-xs font-sans">
-                        No se encontraron cámaras que coincidan con la búsqueda.
-                      </div>
-                    ) : (
-                      filteredCamaras.map(c => {
-                        const isAlreadyPatched = Boolean(c.patch_panel_id && c.puerto_patch && c.switch_id);
-                        return (
-                          <button
-                            key={c.id}
-                            onClick={async () => {
-                              await handleCreateOrUpdateConnection(
-                                assignModal.patchPanelId,
-                                assignModal.patchPort,
-                                assignModal.switchId,
-                                assignModal.switchPort,
-                                c.id
-                              );
-                              setAssignModal(null);
-                            }}
-                            className="w-full text-left p-2.5 rounded border border-slate-200 hover:border-blue-400 bg-white hover:bg-blue-50/40 transition-all flex items-center justify-between cursor-pointer"
-                          >
-                            <div>
-                              <div className="font-mono font-bold text-xs text-slate-900">
-                                {c.codigo}
-                              </div>
-                              <div className="text-[10px] text-slate-500 font-mono">
-                                {c.marca_rel?.nombre || c.marca || ''} {c.modelo_rel?.nombre || c.modelo || ''} · {c.direccion_ip || 'Sin IP'}
-                              </div>
-                            </div>
-                            <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold ${
-                              isAlreadyPatched 
-                                ? 'bg-amber-100 text-amber-800' 
-                                : 'bg-emerald-100 text-emerald-800'
-                            }`}>
-                              {isAlreadyPatched ? 'Reasignar' : 'Disponible'}
-                            </span>
-                          </button>
-                        );
-                      })
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* TAB 3: SOLO ENLACE DE PARCHEO DIRECTO */}
-              {assignModal.activeTab === 'directo' && (
-                <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-3 font-mono text-xs">
-                  <div className="flex items-center gap-2 text-slate-900 font-bold">
-                    <Cable className="w-4 h-4 text-slate-600" />
-                    <span>Enlace Cross-Connect Físico</span>
-                  </div>
-                  <p className="text-[11px] text-slate-600 font-sans leading-relaxed">
-                    Registra la interconexión física (Patch Cord Cat6) entre el Patch Panel <strong>{pp?.codigo}</strong> (Puerto {assignModal.patchPort}) y el Switch <strong>{sw?.codigo}</strong> (Puerto {assignModal.switchPort}). Puedes asociar una cámara o punto de red en cualquier momento posterior.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      showToast(`Enlace físico registrado: ${pp?.codigo} P${assignModal.patchPort} ───> ${sw?.codigo} P${assignModal.switchPort}`, 'info');
-                      setAssignModal(null);
-                      scheduleCableRecalc();
-                    }}
-                    className="w-full py-2 bg-slate-900 hover:bg-black text-white rounded font-bold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                  >
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                    <span>Fijar Enlace Físico de Parcheo</span>
-                  </button>
-                </div>
-              )}
-
-              {/* Modal Footer */}
-              <div className="flex justify-end pt-2 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setAssignModal(null)}
-                  className="px-4 py-1.5 text-xs text-slate-600 hover:text-slate-900 border border-slate-300 rounded font-medium cursor-pointer"
-                >
-                  Cancelar
-                </button>
-              </div>
-            </div>
-          </div>
+          <AsociarServicioDialog
+            isOpen={assignModal.isOpen}
+            onClose={() => setAssignModal(null)}
+            codigo_patch={pp?.codigo || 'Patch Panel'}
+            puerto_patch={assignModal.patchPort}
+            codigo_switch={sw?.codigo || 'Switch'}
+            puerto_switch={assignModal.switchPort}
+            patchPanelId={assignModal.patchPanelId}
+            switchId={assignModal.switchId}
+            vlan_id={swVlanInfo?.vlan_id}
+            vlan_numero={swVlanInfo?.vlan_numero}
+            vlan_nombre={swVlanInfo?.vlan_nombre}
+            color_vlan={swVlanInfo?.vlan_color}
+            uso_vlan={swVlanInfo?.uso}
+            puntosRed={puntosRed}
+            camaras={camaras}
+            onCreateNuevoPunto={async ({ codigo, tipo_punto, ubicacion }) => {
+              const mappedTipo: 'datos_funcionario' | 'datos_alumno' | 'wifi_ap' =
+                tipo_punto === 'datos_alumno'
+                  ? 'datos_alumno'
+                  : tipo_punto === 'wifi_ap'
+                  ? 'wifi_ap'
+                  : 'datos_funcionario';
+              await handleCreateAndConnectNuevoPuntoRed(
+                assignModal.patchPanelId,
+                assignModal.patchPort,
+                assignModal.switchId,
+                assignModal.switchPort,
+                codigo,
+                mappedTipo,
+                ubicacion
+              );
+            }}
+            onSelectExistentePunto={async (puntoId) => {
+              await handleCreateOrUpdateConnection(
+                assignModal.patchPanelId,
+                assignModal.patchPort,
+                assignModal.switchId,
+                assignModal.switchPort,
+                undefined,
+                puntoId
+              );
+            }}
+            onSelectExistenteCamara={async (camaraId) => {
+              await handleCreateOrUpdateConnection(
+                assignModal.patchPanelId,
+                assignModal.patchPort,
+                assignModal.switchId,
+                assignModal.switchPort,
+                camaraId
+              );
+            }}
+            onConnectSoloCable={async () => {
+              showToast(
+                `Enlace físico registrado: ${pp?.codigo} P${assignModal.patchPort} ───> ${sw?.codigo} P${assignModal.switchPort}`,
+                'info'
+              );
+              scheduleCableRecalc();
+            }}
+            loading={savingAction}
+          />
         );
       })()}
     </div>

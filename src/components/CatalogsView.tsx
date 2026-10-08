@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Marca, Modelo, Proveedor, TipoEquipo, Vlan } from '../types/database';
+import { EditarVlanDialog } from './EditarVlanDialog';
 
 export const CatalogsView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'marcas' | 'modelos' | 'proveedores' | 'vlans'>('marcas');
@@ -57,18 +58,6 @@ export const CatalogsView: React.FC = () => {
 
   // Form states for modals
   const [brandFormName, setBrandFormName] = useState('');
-  
-  const [vlanForm, setVlanForm] = useState<{
-    numero: string;
-    nombre: string;
-    color: string;
-    descripcion: string;
-  }>({
-    numero: '',
-    nombre: '',
-    color: '#2563EB',
-    descripcion: '',
-  });
   
   const [modelForm, setModelForm] = useState<{
     marca_id: string;
@@ -399,64 +388,7 @@ export const CatalogsView: React.FC = () => {
   // VLAN ACTIONS
   // ==========================================
   const handleOpenVlanModal = (mode: 'create' | 'edit', item?: Vlan) => {
-    if (mode === 'edit' && item) {
-      setVlanForm({
-        numero: String(item.numero),
-        nombre: item.nombre,
-        color: item.color || '#2563EB',
-        descripcion: item.descripcion || '',
-      });
-    } else {
-      setVlanForm({
-        numero: '',
-        nombre: '',
-        color: '#2563EB',
-        descripcion: '',
-      });
-    }
     setVlanModal({ isOpen: true, mode, item });
-  };
-
-  const handleSaveVlan = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const num = parseInt(vlanForm.numero.trim());
-    const cleanNombre = vlanForm.nombre.trim();
-    if (isNaN(num) || num < 1 || num > 4094) {
-      triggerToast('El número de VLAN debe ser un entero entre 1 y 4094', true);
-      return;
-    }
-    if (!cleanNombre) {
-      triggerToast('Debe ingresar un nombre para la VLAN', true);
-      return;
-    }
-
-    try {
-      setActionLoading(true);
-      const payload = {
-        numero: num,
-        nombre: cleanNombre,
-        color: vlanForm.color || '#2563EB',
-        descripcion: vlanForm.descripcion.trim() || null,
-      };
-
-      if (vlanModal?.mode === 'create') {
-        const { error } = await supabase.from('vlans').insert([payload]);
-        if (error) throw error;
-        triggerToast(`VLAN ${num} ("${cleanNombre}") creada correctamente.`);
-      } else if (vlanModal?.mode === 'edit' && vlanModal.item) {
-        const { error } = await supabase.from('vlans').update(payload).eq('id', vlanModal.item.id);
-        if (error) throw error;
-        // Also update any puertos_switch that had the old vlan number if needed
-        triggerToast(`VLAN ${num} ("${cleanNombre}") actualizada.`);
-      }
-      setVlanModal(null);
-      await loadCatalogs();
-    } catch (err: any) {
-      console.error('Error saving VLAN:', err);
-      triggerToast(err.message || 'Error al guardar la VLAN', true);
-    } finally {
-      setActionLoading(false);
-    }
   };
 
   // ==========================================
@@ -1441,119 +1373,21 @@ export const CatalogsView: React.FC = () => {
       {/* MODAL: VLAN CREATE / EDIT */}
       {/* ========================================== */}
       {vlanModal?.isOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg border border-slate-200 shadow-xl max-w-md w-full overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            <div className="p-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between font-mono">
-              <h3 className="text-xs font-bold text-slate-900 flex items-center gap-2">
-                <Layers className="w-4 h-4 text-indigo-600" />
-                <span>{vlanModal.mode === 'create' ? 'Crear Nueva VLAN' : 'Editar VLAN'}</span>
-              </h3>
-              <button 
-                type="button" 
-                onClick={() => setVlanModal(null)}
-                className="text-slate-400 hover:text-slate-700 text-sm font-bold cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
-
-            <form onSubmit={handleSaveVlan} className="p-5 space-y-4 text-xs font-mono">
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-[11px] text-slate-600 mb-1">ID VLAN *</label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={4094}
-                    required
-                    autoFocus
-                    value={vlanForm.numero}
-                    onChange={(e) => setVlanForm({ ...vlanForm, numero: e.target.value })}
-                    placeholder="10"
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded font-bold text-slate-900 text-xs bg-white focus:ring-1 focus:ring-indigo-600"
-                  />
-                </div>
-                <div className="col-span-2">
-                  <label className="block text-[11px] text-slate-600 mb-1">Nombre de Red *</label>
-                  <input
-                    type="text"
-                    required
-                    value={vlanForm.nombre}
-                    onChange={(e) => setVlanForm({ ...vlanForm, nombre: e.target.value })}
-                    placeholder="ej. CCTV - Cámaras de Seguridad"
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs bg-white focus:ring-1 focus:ring-indigo-600"
-                  />
-                </div>
-              </div>
-
-              {/* Color Selector */}
-              <div>
-                <label className="block text-[11px] text-slate-600 mb-1.5 flex items-center justify-between">
-                  <span className="flex items-center gap-1.5">
-                    <Palette className="w-3.5 h-3.5 text-slate-500" />
-                    <span>Color Identificador</span>
-                  </span>
-                  <span className="text-[10px] text-slate-400 uppercase font-mono">{vlanForm.color}</span>
-                </label>
-                <div className="flex items-center gap-2 flex-wrap p-2 border border-slate-200 rounded-lg bg-slate-50">
-                  {['#2563EB', '#0891B2', '#059669', '#7C3AED', '#D97706', '#DC2626', '#4F46E5', '#DB2777', '#475569'].map(c => (
-                    <button
-                      key={c}
-                      type="button"
-                      onClick={() => setVlanForm({ ...vlanForm, color: c })}
-                      className={`w-6 h-6 rounded-full border transition-all cursor-pointer ${
-                        vlanForm.color.toLowerCase() === c.toLowerCase()
-                          ? 'scale-125 border-slate-900 ring-2 ring-indigo-500/50 shadow-xs'
-                          : 'border-black/20 hover:scale-110'
-                      }`}
-                      style={{ backgroundColor: c }}
-                      title={c}
-                    />
-                  ))}
-                  <div className="h-5 w-px bg-slate-300 mx-1" />
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      type="color"
-                      value={vlanForm.color}
-                      onChange={(e) => setVlanForm({ ...vlanForm, color: e.target.value })}
-                      title="Seleccionar color personalizado"
-                      className="w-7 h-7 p-0 border border-slate-300 rounded cursor-pointer"
-                    />
-                    <span className="text-[10px] text-slate-500">Personalizado</span>
-                  </div>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] text-slate-600 mb-1">Descripción / Uso previsto (Opcional)</label>
-                <input
-                  type="text"
-                  value={vlanForm.descripcion}
-                  onChange={(e) => setVlanForm({ ...vlanForm, descripcion: e.target.value })}
-                  placeholder="ej. Segmento exclusivo para videovigilancia y grabadores"
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs bg-white focus:ring-1 focus:ring-indigo-600"
-                />
-              </div>
-
-              <div className="pt-2 flex justify-end gap-2 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setVlanModal(null)}
-                  className="px-3 py-1.5 text-slate-600 hover:bg-slate-100 rounded cursor-pointer"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  disabled={actionLoading || !vlanForm.numero.trim() || !vlanForm.nombre.trim()}
-                  className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-semibold disabled:opacity-50 cursor-pointer shadow-xs"
-                >
-                  {actionLoading ? 'Guardando...' : (vlanModal.mode === 'create' ? 'Crear VLAN' : 'Guardar Cambios')}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <EditarVlanDialog
+          isOpen={vlanModal.isOpen}
+          mode={vlanModal.mode}
+          vlan={vlanModal.item}
+          onClose={() => setVlanModal(null)}
+          onSaved={async (savedVlan) => {
+            triggerToast(
+              vlanModal.mode === 'create'
+                ? `VLAN ${savedVlan.numero} ("${savedVlan.nombre}") creada correctamente.`
+                : `VLAN ${savedVlan.numero} ("${savedVlan.nombre}") actualizada.`
+            );
+            setVlanModal(null);
+            await loadCatalogs();
+          }}
+        />
       )}
 
       {/* ========================================== */}
