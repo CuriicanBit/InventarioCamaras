@@ -15,12 +15,14 @@ import {
   X,
   ChevronRight,
   BarChart3,
-  Network
+  Network,
+  Cable
 } from 'lucide-react';
 
 export type NavView = 
   | 'explorador' 
   | 'elevacion' 
+  | 'topologia'
   | 'puertos' 
   | 'camara' 
   | 'registro' 
@@ -98,9 +100,10 @@ export const Header: React.FC<HeaderProps> = ({
   const navItems: { id: NavView; label: string; icon: React.ReactNode; badge?: number; badgeColor?: string }[] = [
     { id: 'explorador', label: 'Explorador Físico', icon: <Layers className="w-3.5 h-3.5" /> },
     { id: 'elevacion', label: 'Diagrama de Rack', icon: <Server className="w-3.5 h-3.5" /> },
+    { id: 'topologia', label: 'Topología', icon: <Network className="w-3.5 h-3.5" /> },
     { id: 'puertos', label: 'Mapeo de Puertos', icon: <Cpu className="w-3.5 h-3.5" /> },
     { id: 'camara', label: 'Ficha de Cámara', icon: <Camera className="w-3.5 h-3.5" /> },
-    { id: 'puntos_red', label: 'Puntos de Red', icon: <Network className="w-3.5 h-3.5" /> },
+    { id: 'puntos_red', label: 'Puntos de Red', icon: <Cable className="w-3.5 h-3.5" /> },
     { id: 'registro', label: 'Registro Terreno', icon: <PlusCircle className="w-3.5 h-3.5" /> },
     { id: 'mantenimiento', label: 'Bitácora / Mantención', icon: <Wrench className="w-3.5 h-3.5" /> },
     { id: 'inventario', label: 'Inventario General', icon: <ListFilter className="w-3.5 h-3.5" /> },
@@ -158,6 +161,7 @@ export const Header: React.FC<HeaderProps> = ({
       case 'bodega_bajas': return 'Bodega / Bajas (Equipos y Cámaras Retirados de Servicio)';
       case 'sin_asignar': return 'Bandeja de Dispositivos Sin Asignación Jerárquica';
       case 'catalogos': return 'Gestor de Catálogos (Marcas, Modelos y Proveedores)';
+      case 'topologia': return 'Topología de Red (Enlaces Troncales y Conmutación)';
       default: return 'Sistema de Infraestructura CCTV';
     }
   };

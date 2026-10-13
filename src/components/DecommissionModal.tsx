@@ -28,6 +28,32 @@ export const DecommissionModal: React.FC<DecommissionModalProps> = ({
   const [loading, setLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // Trunk links detection for switches
+  const [trunkLinksCount, setTrunkLinksCount] = useState<number>(0);
+  const [confirmTrunkDelete, setConfirmTrunkDelete] = useState<boolean>(false);
+
+  React.useEffect(() => {
+    if (!isOpen || itemType !== 'equipo' || !itemId) {
+      setTrunkLinksCount(0);
+      setConfirmTrunkDelete(false);
+      return;
+    }
+
+    const checkTrunkLinks = async () => {
+      try {
+        const { data } = await supabase
+          .from('enlaces_switch')
+          .select('id')
+          .or(`switch_origen_id.eq.${itemId},switch_destino_id.eq.${itemId}`);
+        setTrunkLinksCount(data?.length || 0);
+      } catch (err) {
+        console.error('Error checking trunk links in DecommissionModal:', err);
+      }
+    };
+
+    checkTrunkLinks();
+  }, [isOpen, itemType, itemId]);
+
   if (!isOpen) return null;
 
   const handleRetirar = async (e: React.FormEvent) => {
@@ -35,6 +61,13 @@ export const DecommissionModal: React.FC<DecommissionModalProps> = ({
     try {
       setLoading(true);
       setErrorMsg(null);
+
+      // Si el equipo es un switch con enlaces troncales y se retira (pasa a bodega/baja), exigir confirmación
+      if (itemType === 'equipo' && nuevoEstado !== 'instalado' && trunkLinksCount > 0 && !confirmTrunkDelete) {
+        setErrorMsg(`Este switch tiene ${trunkLinksCount} enlace(s) troncal(es) que se eliminarán. Por favor confirme para continuar.`);
+        setLoading(false);
+        return;
+      }
 
       // 1. Update device: set estado_ciclo_vida and if not 'instalado', clear physical connection fields
       if (itemType === 'camara') {
@@ -246,6 +279,30 @@ export const DecommissionModal: React.FC<DecommissionModalProps> = ({
             />
           </div>
 
+          {/* Advertencia y confirmación si el switch tiene enlaces troncales */}
+          {itemType === 'equipo' && nuevoEstado !== 'instalado' && trunkLinksCount > 0 && (
+            <div className="p-3 bg-amber-50 border border-amber-300 rounded-lg space-y-2">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                <div className="text-xs text-amber-950 font-sans leading-relaxed">
+                  Este switch tiene <strong className="text-amber-900">{trunkLinksCount} enlace(s) troncal(es)</strong> que se eliminarán.
+                </div>
+              </div>
+              <label className="flex items-center gap-2 pt-1 border-t border-amber-200 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={confirmTrunkDelete}
+                  onChange={(e) => setConfirmTrunkDelete(e.target.checked)}
+                  disabled={loading}
+                  className="rounded border-amber-400 text-amber-600 focus:ring-amber-500 w-4 h-4 cursor-pointer"
+                />
+                <span className="text-[11px] font-bold text-amber-900 font-sans">
+                  Entiendo y confirmo que los enlaces troncales se eliminarán
+                </span>
+              </label>
+            </div>
+          )}
+
           <div className="pt-2 flex justify-end gap-2 border-t border-slate-200">
             <button
               type="button"
@@ -256,7 +313,7 @@ export const DecommissionModal: React.FC<DecommissionModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || (itemType === 'equipo' && nuevoEstado !== 'instalado' && trunkLinksCount > 0 && !confirmTrunkDelete)}
               className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded font-bold text-xs shadow-xs disabled:opacity-50"
             >
               <Archive className="w-3.5 h-3.5" />

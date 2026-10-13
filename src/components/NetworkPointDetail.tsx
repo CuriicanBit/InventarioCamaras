@@ -40,6 +40,7 @@ import {
 import { DecommissionModal } from './DecommissionModal';
 import { DeleteConfirmModal } from './DeleteConfirmModal';
 import { MaintenanceHistory } from './MaintenanceHistory';
+import { getAlimentacionLabel, getWifiGeneracionLabel, getPoeEstandarLabel } from '../utils/poeUtils';
 
 interface NetworkPointDetailProps {
   point: PuntoRed;
@@ -416,13 +417,52 @@ export const NetworkPointDetail: React.FC<NetworkPointDetailProps> = ({
                 </span>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                 <div className="p-3 bg-slate-50 rounded border border-slate-200">
                   <span className="text-[10px] text-slate-400 block mb-0.5 uppercase">MARCA Y MODELO</span>
                   <span className="font-bold text-slate-900 text-sm">
                     {currentPoint.marca_rel?.nombre || '-'} {currentPoint.modelo_rel?.nombre || ''}
                   </span>
                 </div>
+
+                <div className="p-3 bg-slate-50 rounded border border-slate-200">
+                  <span className="text-[10px] text-slate-400 block mb-0.5 uppercase">ALIMENTACIÓN</span>
+                  <span className={`font-bold text-sm block ${currentPoint.alimentacion ? 'text-indigo-900' : 'text-slate-500 italic'}`}>
+                    {getAlimentacionLabel(currentPoint.alimentacion)}
+                  </span>
+                </div>
+
+                <div className="p-3 bg-slate-50 rounded border border-slate-200">
+                  <span className="text-[10px] text-slate-400 block mb-0.5 uppercase">RADIO DE COBERTURA</span>
+                  <span className="font-bold text-slate-900 text-sm">
+                    {currentPoint.alcance_metros ? `${currentPoint.alcance_metros} m` : (currentPoint.modelo_rel?.alcance_m_default ? `${currentPoint.modelo_rel.alcance_m_default} m (por defecto)` : 'No especificado')}
+                  </span>
+                </div>
+
+                <div className="p-3 bg-slate-50 rounded border border-slate-200">
+                  <span className="text-[10px] text-slate-400 block mb-0.5 uppercase">APERTURA FOV</span>
+                  <span className="font-bold text-slate-900 text-sm">
+                    {currentPoint.apertura_fov ? `${currentPoint.apertura_fov}°` : '360°'}
+                  </span>
+                </div>
+
+                {currentPoint.modelo_rel?.wifi_generacion && (
+                  <div className="p-3 bg-slate-50 rounded border border-slate-200">
+                    <span className="text-[10px] text-slate-400 block mb-0.5 uppercase">GENERACIÓN WI-FI</span>
+                    <span className="font-bold text-indigo-700 text-sm">
+                      {getWifiGeneracionLabel(currentPoint.modelo_rel.wifi_generacion)}
+                    </span>
+                  </div>
+                )}
+
+                {currentPoint.modelo_rel?.poe_requerido && (
+                  <div className="p-3 bg-slate-50 rounded border border-slate-200">
+                    <span className="text-[10px] text-slate-400 block mb-0.5 uppercase">POE REQUERIDO</span>
+                    <span className="font-bold text-amber-800 text-sm">
+                      {getPoeEstandarLabel(currentPoint.modelo_rel.poe_requerido)}
+                    </span>
+                  </div>
+                )}
 
                 <div className="p-3 bg-slate-50 rounded border border-slate-200">
                   <span className="text-[10px] text-slate-400 block mb-0.5 uppercase">NÚMERO DE SERIE</span>

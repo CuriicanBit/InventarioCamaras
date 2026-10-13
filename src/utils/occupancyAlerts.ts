@@ -11,6 +11,7 @@ export interface EquipmentOccupancyInfo {
   occupiedCount: number;
   availableCount: number;
   percentage: number;
+  noAplica?: boolean;
   status: OccupancyStatus;
   statusLabel: string;
   badgeBgClass: string;
@@ -104,6 +105,34 @@ export function calculateEquipmentOccupancy(
   const isSwitch = equipo.tipo === 'switch';
   const isPatchPanel = equipo.tipo === 'patch_panel';
   const isNvr = equipo.tipo === 'nvr';
+
+  const isSwitchWithZeroRj45 = isSwitch && (
+    equipo.puertos_totales === 0 || 
+    (equipo.puertos_totales === null && equipo.modelo_rel?.puertos_default === 0)
+  );
+
+  if (isSwitchWithZeroRj45) {
+    return {
+      equipoId: equipo.id,
+      equipoCodigo: equipo.codigo,
+      tipo: equipo.tipo,
+      totalCapacity: 0,
+      occupiedCount: 0,
+      availableCount: 0,
+      percentage: 0,
+      noAplica: true,
+      status: 'optimo',
+      statusLabel: 'No aplica',
+      badgeBgClass: 'bg-slate-100 text-slate-700 border-slate-300',
+      badgeTextClass: 'text-slate-600',
+      badgeBorderClass: 'border-slate-300',
+      barColorClass: 'bg-slate-300',
+      recommendation: 'Switch exclusivo SFP (0 puertos RJ45)',
+      needsExpansion: false,
+      connectedCameras: [],
+      connectedUplinks: [],
+    };
+  }
 
   let totalCapacity = 0;
   if (isSwitch || isPatchPanel) {

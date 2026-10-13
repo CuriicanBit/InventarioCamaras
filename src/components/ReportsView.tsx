@@ -23,12 +23,16 @@ import {
   MapPin,
   FileText,
   Wrench,
-  LayoutDashboard
+  LayoutDashboard,
+  Zap,
+  Wifi,
+  Building
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Equipo, Camara, Rack, Piso, Edificio, Campus, Sede, PuntoRed } from '../types/database';
+import { Equipo, Camara, Rack, Piso, Edificio, Campus, Sede, PuntoRed, ConexionSinPoe, RevisionPoeItem, formatSwitchPorts } from '../types/database';
 import { calculateEquipmentOccupancy, EquipmentOccupancyInfo, OccupancyStatus } from '../utils/occupancyAlerts';
 import { exportReportToExcel, exportReportToPdf, ReportFilterItem, ReportKpiSummaryItem } from '../utils/reportExport';
+import { getPoeEstandarLabel, getAlimentacionLabel } from '../utils/poeUtils';
 import { LocationInventoryReport } from './LocationInventoryReport';
 import { DeviceInterventionsReport } from './DeviceInterventionsReport';
 import { ExecutiveDashboard } from './ExecutiveDashboard';
@@ -44,7 +48,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   onNavigateToPorts,
   onSelectCamera,
 }) => {
-  const [activeTab, setActiveTab] = useState<'ejecutivo' | 'ocupacion' | 'ubicacion' | 'intervenciones'>('ejecutivo');
+  const [activeTab, setActiveTab] = useState<'ejecutivo' | 'ocupacion' | 'ubicacion' | 'intervenciones' | 'inyectores_poe'>('ejecutivo');
   const [loading, setLoading] = useState(true);
   const [equipos, setEquipos] = useState<Equipo[]>([]);
   const [camaras, setCamaras] = useState<Camara[]>([]);
@@ -56,12 +60,19 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   const [campusList, setCampusList] = useState<Campus[]>([]);
   const [sedes, setSedes] = useState<Sede[]>([]);
   const [nvrUplinks, setNvrUplinks] = useState<Record<string, any>>({});
+  const [conexionesSinPoe, setConexionesSinPoe] = useState<ConexionSinPoe[]>([]);
+  const [revisionPoeList, setRevisionPoeList] = useState<RevisionPoeItem[]>([]);
 
-  // Filters
+  // Filters for Occupancy
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState<'all' | OccupancyStatus>('all');
   const [filterTipo, setFilterTipo] = useState<'all' | 'switch' | 'nvr' | 'patch_panel'>('all');
   const [filterRackId, setFilterRackId] = useState<string>('all');
+
+  // Filters for Inyectores PoE
+  const [poeFilterTipo, setPoeFilterTipo] = useState<'all' | 'camara' | 'wifi_ap'>('all');
+  const [poeFilterEdificio, setPoeFilterEdificio] = useState<string>('all');
+  const [poeSearch, setPoeSearch] = useState<string>('');
 
   // Expanded equipment id for connected device details
   const [expandedEquipoId, setExpandedEquipoId] = useState<string | null>(null);
@@ -89,6 +100,8 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         { data: edData },
         { data: cpData },
         { data: sdData },
+        { data: sinPoeData },
+        { data: revPoeData },
       ] = await Promise.all([
         supabase
           .from('equipos')
@@ -110,6 +123,8 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
         supabase.from('edificios').select('*').order('nombre'),
         supabase.from('campus').select('*').order('nombre'),
         supabase.from('sedes').select('*').order('nombre'),
+        supabase.from('v_conexiones_sin_poe').select('*').order('codigo'),
+        supabase.from('v_revision_poe').select('*').order('codigo'),
       ]);
 
       setEquipos(eqData || []);
@@ -121,6 +136,8 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
       setEdificios(edData || []);
       setCampusList(cpData || []);
       setSedes(sdData || []);
+      setConexionesSinPoe(sinPoeData || []);
+      setRevisionPoeList(revPoeData || []);
     } catch (err) {
       console.error('Error loading reports data:', err);
     } finally {
@@ -220,6 +237,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     let optCount = 0;
 
     occupancyList.forEach(item => {
+      if (item.noAplica || (item.tipo === 'switch' && item.equipo.puertos_totales === 0)) return;
       totalCap += item.totalCapacity;
       totalOcc += item.occupiedCount;
       if (item.status === 'critico') critCount++;
@@ -381,6 +399,188 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     });
   };
 
+  // ==========================================
+  // INYECTORES POE: FILTROS Y EXPORTACIÓN
+  // ==========================================
+  const poeEdificiosList = useMemo(() => {
+    const set = new Set<string>();
+    revisionPoeList.forEach(c => {
+      if (c.edificio) set.add(c.edificio);
+    });
+    edificios.forEach(e => {
+      if (e.nombre) set.add(e.nombre);
+    });
+    return Array.from(set).sort();
+  }, [revisionPoeList, edificios]);
+
+  const filteredRevisionPoe = useMemo(() => {
+    return revisionPoeList.filter(item => {
+      if (poeFilterTipo !== 'all' && item.tipo_dispositivo !== poeFilterTipo) {
+        return false;
+      }
+      if (poeFilterEdificio !== 'all' && (item.edificio || 'Sin Edificio') !== poeFilterEdificio) {
+        return false;
+      }
+      if (poeSearch.trim()) {
+        const q = poeSearch.toLowerCase().trim();
+        const codeMatch = (item.codigo || '').toLowerCase().includes(q);
+        const modMatch = (item.modelo || '').toLowerCase().includes(q);
+        const swMatch = (item.switch_codigo || '').toLowerCase().includes(q);
+        const edMatch = (item.edificio || '').toLowerCase().includes(q);
+        const piMatch = (item.piso || '').toLowerCase().includes(q);
+        const alimMatch = (item.alimentacion || '').toLowerCase().includes(q);
+        const tipoMatch = (item.tipo_dispositivo === 'camara' ? 'cámara cctv' : 'wifi access point ap').includes(q);
+        if (!codeMatch && !modMatch && !swMatch && !edMatch && !piMatch && !alimMatch && !tipoMatch) return false;
+      }
+      return true;
+    });
+  }, [revisionPoeList, poeFilterTipo, poeFilterEdificio, poeSearch]);
+
+  // Tres bloques según Requirement 4:
+  // 1. "Sin PoE sin resolver": estado_poe = 'sin_poe' y resuelto = false.
+  const blockSinPoeSinResolver = useMemo(() => {
+    return filteredRevisionPoe.filter(item => item.estado_poe === 'sin_poe' && !item.resuelto);
+  }, [filteredRevisionPoe]);
+
+  // 2. "Resueltos con inyector o fuente propia": resuelto = true.
+  const blockResueltos = useMemo(() => {
+    return filteredRevisionPoe.filter(item => item.resuelto === true);
+  }, [filteredRevisionPoe]);
+
+  // 3. "Estándar insuficiente": estado_poe = 'estandar_insuficiente' y resuelto = false.
+  const blockEstandarInsuficiente = useMemo(() => {
+    return filteredRevisionPoe.filter(item => item.estado_poe === 'estandar_insuficiente' && !item.resuelto);
+  }, [filteredRevisionPoe]);
+
+  const handleExportExcelPoe = () => {
+    const headers = [
+      'Bloque / Condición',
+      'Tipo Dispositivo',
+      'Código',
+      'Modelo',
+      'Edificio',
+      'Piso',
+      'Switch',
+      'Puerto RJ45',
+      'Estándar Switch',
+      'Estándar Requerido',
+      'Alimentación Declarada',
+      'Estado PoE',
+      'Resuelto'
+    ];
+
+    const formatRow = (item: RevisionPoeItem, bloque: string) => [
+      bloque,
+      item.tipo_dispositivo === 'camara' ? 'Cámara CCTV' : 'WiFi AP',
+      item.codigo,
+      item.modelo || 'Sin modelo',
+      item.edificio || 'Sin asignar',
+      item.piso || 'Sin asignar',
+      item.switch_codigo || '-',
+      `#${item.numero_puerto}`,
+      getPoeEstandarLabel(item.estandar_switch) || '-',
+      getPoeEstandarLabel(item.estandar_requerido) || '-',
+      getAlimentacionLabel(item.alimentacion),
+      item.estado_poe,
+      item.resuelto ? 'Sí (Resuelto)' : 'No (Pendiente)'
+    ];
+
+    const rows = [
+      ...blockSinPoeSinResolver.map(i => formatRow(i, 'Sin PoE sin resolver')),
+      ...blockResueltos.map(i => formatRow(i, 'Resueltos con inyector o fuente propia')),
+      ...blockEstandarInsuficiente.map(i => formatRow(i, 'Estándar insuficiente')),
+    ];
+
+    const activeFilters: ReportFilterItem[] = [];
+    if (poeFilterTipo !== 'all') {
+      activeFilters.push({ label: 'Tipo', value: poeFilterTipo === 'camara' ? 'Cámara' : 'WiFi AP' });
+    }
+    if (poeFilterEdificio !== 'all') {
+      activeFilters.push({ label: 'Edificio', value: poeFilterEdificio });
+    }
+    if (poeSearch.trim()) {
+      activeFilters.push({ label: 'Búsqueda', value: `"${poeSearch.trim()}"` });
+    }
+
+    const summaryKpis: ReportKpiSummaryItem[] = [
+      { label: 'Sin PoE sin resolver', value: blockSinPoeSinResolver.length },
+      { label: 'Resueltos con inyector/fuente', value: blockResueltos.length },
+      { label: 'Estándar insuficiente', value: blockEstandarInsuficiente.length },
+      { label: 'Total evaluados', value: rows.length }
+    ];
+
+    exportReportToExcel({
+      title: 'Reporte de Revisión PoE e Inyectores',
+      subtitle: 'CCTV InfraRegistro · Evaluación de compatibilidad PoE y alimentación de dispositivos',
+      filename: `Reporte_Inyectores_PoE_${new Date().toISOString().slice(0, 10)}`,
+      headers,
+      rows,
+      appliedFilters: activeFilters,
+      summaryKpis,
+    });
+  };
+
+  const handleExportPdfPoe = () => {
+    const headers = ['Bloque', 'Tipo', 'Código', 'Modelo', 'Ubicación', 'Switch', 'Puerto', 'Estándar / Alimentación'];
+
+    const formatPdfRow = (item: RevisionPoeItem, bloque: string) => {
+      let estandarAlim = '';
+      if (item.resuelto) {
+        estandarAlim = `Alimentación: ${getAlimentacionLabel(item.alimentacion)}`;
+      } else if (item.estado_poe === 'estandar_insuficiente') {
+        estandarAlim = `SW: ${getPoeEstandarLabel(item.estandar_switch) || '?'} | Req: ${getPoeEstandarLabel(item.estandar_requerido) || '?'}`;
+      } else {
+        estandarAlim = 'Sin entrega PoE (Req. inyector/fuente)';
+      }
+
+      return [
+        bloque,
+        item.tipo_dispositivo === 'camara' ? 'Cámara' : 'WiFi AP',
+        item.codigo,
+        item.modelo || '-',
+        `${item.edificio || 'S/E'} - ${item.piso || 'S/P'}`,
+        item.switch_codigo || '-',
+        `#${item.numero_puerto}`,
+        estandarAlim
+      ];
+    };
+
+    const rows = [
+      ...blockSinPoeSinResolver.map(i => formatPdfRow(i, 'Sin PoE')),
+      ...blockResueltos.map(i => formatPdfRow(i, 'Resuelto')),
+      ...blockEstandarInsuficiente.map(i => formatPdfRow(i, 'Estándar Insuf.')),
+    ];
+
+    const activeFilters: ReportFilterItem[] = [];
+    if (poeFilterTipo !== 'all') {
+      activeFilters.push({ label: 'Tipo', value: poeFilterTipo === 'camara' ? 'Cámara' : 'WiFi AP' });
+    }
+    if (poeFilterEdificio !== 'all') {
+      activeFilters.push({ label: 'Edificio', value: poeFilterEdificio });
+    }
+    if (poeSearch.trim()) {
+      activeFilters.push({ label: 'Búsqueda', value: `"${poeSearch.trim()}"` });
+    }
+
+    const summaryKpis: ReportKpiSummaryItem[] = [
+      { label: 'Sin PoE sin resolver', value: blockSinPoeSinResolver.length },
+      { label: 'Resueltos con inyector/fuente', value: blockResueltos.length },
+      { label: 'Estándar insuficiente', value: blockEstandarInsuficiente.length },
+      { label: 'Total evaluados', value: rows.length }
+    ];
+
+    exportReportToPdf({
+      title: 'Reporte de Revisión PoE e Inyectores',
+      subtitle: 'CCTV InfraRegistro · Dispositivos y compatibilidad con puertos switch',
+      filename: `Reporte_Inyectores_PoE_${new Date().toISOString().slice(0, 10)}`,
+      headers,
+      rows,
+      appliedFilters: activeFilters,
+      summaryKpis,
+      orientation: 'landscape',
+    });
+  };
+
   const getTipoIcon = (tipo: string) => {
     switch (tipo) {
       case 'switch':
@@ -455,6 +655,32 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
               </button>
             </>
           )}
+
+          {activeTab === 'inyectores_poe' && (
+            <>
+              <button
+                type="button"
+                onClick={handleExportExcelPoe}
+                disabled={filteredRevisionPoe.length === 0}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white rounded transition-colors shadow-2xs cursor-pointer disabled:opacity-50"
+                title="Exportar reporte de inyectores PoE a Excel (.xlsx)"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Exportar a Excel</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleExportPdfPoe}
+                disabled={filteredRevisionPoe.length === 0}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white rounded transition-colors shadow-2xs cursor-pointer disabled:opacity-50"
+                title="Generar reporte PDF de inyectores PoE"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>Exportar a PDF</span>
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -519,6 +745,24 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           >
             <Wrench className="w-4 h-4" />
             <span>Intervenciones por Dispositivo</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('inyectores_poe')}
+            className={`px-4 py-2.5 text-xs font-bold font-mono border-b-2 transition-all flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+              activeTab === 'inyectores_poe'
+                ? 'border-amber-600 text-amber-700 bg-amber-50/40'
+                : 'border-transparent text-slate-600 hover:text-slate-900 hover:border-slate-300'
+            }`}
+          >
+            <Zap className="w-4 h-4 text-amber-500" />
+            <span>Inyectores PoE</span>
+            {conexionesSinPoe.length > 0 && (
+              <span className="text-[10px] bg-amber-500 text-white px-1.5 py-0.2 rounded-full font-bold">
+                {conexionesSinPoe.length}
+              </span>
+            )}
           </button>
         </div>
 
@@ -816,32 +1060,38 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                             </td>
 
                             <td className="py-2.5 px-3 text-center font-bold text-slate-700">
-                              {item.totalCapacity}
+                              {item.tipo === 'switch'
+                                ? formatSwitchPorts(item.equipo.puertos_totales, item.equipo.puertos_sfp_totales)
+                                : item.totalCapacity}
                             </td>
 
                             <td className="py-2.5 px-3 text-center font-bold text-blue-700">
-                              {item.occupiedCount}
+                              {item.noAplica ? 'No aplica' : item.occupiedCount}
                             </td>
 
                             <td className="py-2.5 px-3 text-center font-bold text-slate-500">
-                              {item.availableCount}
+                              {item.noAplica ? 'No aplica' : item.availableCount}
                             </td>
 
                             <td className="py-2.5 px-3">
-                              <div className="space-y-1">
-                                <div className="flex items-center justify-between text-[11px] font-bold">
-                                  <span className={item.badgeTextClass}>{item.percentage}%</span>
-                                  <span className="text-[10px] text-slate-400 font-normal">
-                                    {item.occupiedCount} de {item.totalCapacity}
-                                  </span>
+                              {item.noAplica ? (
+                                <span className="text-[11px] font-bold text-slate-500 font-mono">No aplica</span>
+                              ) : (
+                                <div className="space-y-1">
+                                  <div className="flex items-center justify-between text-[11px] font-bold">
+                                    <span className={item.badgeTextClass}>{item.percentage}%</span>
+                                    <span className="text-[10px] text-slate-400 font-normal">
+                                      {item.occupiedCount} de {item.totalCapacity}
+                                    </span>
+                                  </div>
+                                  <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden border border-slate-200">
+                                    <div 
+                                      className={`h-full ${item.barColorClass}`} 
+                                      style={{ width: `${Math.min(100, item.percentage)}%` }} 
+                                    />
+                                  </div>
                                 </div>
-                                <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden border border-slate-200">
-                                  <div 
-                                    className={`h-full ${item.barColorClass}`} 
-                                    style={{ width: `${Math.min(100, item.percentage)}%` }} 
-                                  />
-                                </div>
-                              </div>
+                              )}
                             </td>
 
                             <td className="py-2.5 px-3">
@@ -1026,6 +1276,446 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           onSelectCamera={onSelectCamera}
           onSelectRack={onSelectRack}
         />
+      )}
+
+      {/* ======================================================== */}
+      {/* PESTAÑA: INYECTORES POE (v_conexiones_sin_poe)          */}
+      {/* ======================================================== */}
+      {activeTab === 'inyectores_poe' && (
+        <div className="space-y-6">
+          {/* Barra de Filtros y Búsqueda */}
+          <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs space-y-3">
+            <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2.5 flex-1">
+                {/* Búsqueda rápida */}
+                <div className="relative min-w-[200px] flex-1 max-w-xs">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-2.5 top-2.5" />
+                  <input
+                    type="text"
+                    value={poeSearch}
+                    onChange={(e) => setPoeSearch(e.target.value)}
+                    placeholder="Buscar código, switch, modelo, edificio..."
+                    className="w-full pl-8 pr-3 py-1.5 border border-slate-300 rounded text-xs bg-white focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono"
+                  />
+                  {poeSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setPoeSearch('')}
+                      className="absolute right-2 top-2 text-slate-400 hover:text-slate-600 text-xs cursor-pointer"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+
+                {/* Filtro por Tipo de dispositivo */}
+                <div className="flex items-center gap-1.5">
+                  <Filter className="w-3.5 h-3.5 text-slate-400" />
+                  <select
+                    value={poeFilterTipo}
+                    onChange={(e) => setPoeFilterTipo(e.target.value as any)}
+                    className="px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs font-mono font-medium focus:ring-1 focus:ring-amber-500"
+                  >
+                    <option value="all">Tipo: Todos ({revisionPoeList.length})</option>
+                    <option value="camara">
+                      Solo Cámaras ({revisionPoeList.filter(c => c.tipo_dispositivo === 'camara').length})
+                    </option>
+                    <option value="wifi_ap">
+                      Solo WiFi AP ({revisionPoeList.filter(c => c.tipo_dispositivo === 'wifi_ap').length})
+                    </option>
+                  </select>
+                </div>
+
+                {/* Filtro por Edificio */}
+                <div className="flex items-center gap-1.5">
+                  <Building className="w-3.5 h-3.5 text-slate-400" />
+                  <select
+                    value={poeFilterEdificio}
+                    onChange={(e) => setPoeFilterEdificio(e.target.value)}
+                    className="px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs font-mono font-medium focus:ring-1 focus:ring-amber-500 max-w-[220px] truncate"
+                  >
+                    <option value="all">Edificio: Todos ({poeEdificiosList.length})</option>
+                    {poeEdificiosList.map(ed => (
+                      <option key={ed} value={ed}>{ed}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {(poeFilterTipo !== 'all' || poeFilterEdificio !== 'all' || poeSearch) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPoeFilterTipo('all');
+                      setPoeFilterEdificio('all');
+                      setPoeSearch('');
+                    }}
+                    className="text-xs text-slate-500 hover:text-amber-700 underline font-mono cursor-pointer"
+                  >
+                    Limpiar filtros
+                  </button>
+                )}
+              </div>
+
+              {/* Botones de Exportación */}
+              <div className="flex items-center gap-2 self-end md:self-center">
+                <button
+                  type="button"
+                  onClick={handleExportExcelPoe}
+                  disabled={filteredRevisionPoe.length === 0}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white rounded transition-colors shadow-2xs cursor-pointer disabled:opacity-50"
+                  title="Exportar reporte a Excel (.xlsx)"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Excel</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleExportPdfPoe}
+                  disabled={filteredRevisionPoe.length === 0}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white rounded transition-colors shadow-2xs cursor-pointer disabled:opacity-50"
+                  title="Exportar reporte a PDF (.pdf)"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>PDF</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Resumen de las 3 tarjetas de conteo */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 shadow-2xs flex items-center justify-between">
+              <div>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-amber-800 font-mono block">
+                  Sin PoE sin resolver
+                </span>
+                <span className="text-2xl font-extrabold font-mono text-amber-950 mt-1 block">
+                  {blockSinPoeSinResolver.length}
+                </span>
+                <span className="text-[10px] text-amber-700 font-sans mt-0.5 block">
+                  Requieren inyector PoE o fuente
+                </span>
+              </div>
+              <div className="p-3 bg-amber-100 text-amber-700 rounded-xl">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+            </div>
+
+            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 shadow-2xs flex items-center justify-between">
+              <div>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-800 font-mono block">
+                  Resueltos con inyector / fuente
+                </span>
+                <span className="text-2xl font-extrabold font-mono text-emerald-950 mt-1 block">
+                  {blockResueltos.length}
+                </span>
+                <span className="text-[10px] text-emerald-700 font-sans mt-0.5 block">
+                  Alimentación declarada activa
+                </span>
+              </div>
+              <div className="p-3 bg-emerald-100 text-emerald-700 rounded-xl">
+                <CheckCircle2 className="w-6 h-6" />
+              </div>
+            </div>
+
+            <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 shadow-2xs flex items-center justify-between">
+              <div>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-rose-800 font-mono block">
+                  Estándar insuficiente
+                </span>
+                <span className="text-2xl font-extrabold font-mono text-rose-950 mt-1 block">
+                  {blockEstandarInsuficiente.length}
+                </span>
+                <span className="text-[10px] text-rose-700 font-sans mt-0.5 block">
+                  Switch entrega estándar menor
+                </span>
+              </div>
+              <div className="p-3 bg-rose-100 text-rose-700 rounded-xl">
+                <AlertCircle className="w-6 h-6" />
+              </div>
+            </div>
+          </div>
+
+          {/* ======================================================== */}
+          {/* BLOQUE 1: SIN POE SIN RESOLVER                           */}
+          {/* ======================================================== */}
+          <div className="bg-white border border-slate-200 rounded-xl shadow-2xs overflow-hidden">
+            <div className="p-4 border-b border-slate-200 bg-amber-50/60 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-amber-100 text-amber-800 rounded-lg">
+                  <AlertTriangle className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-mono font-bold text-sm text-slate-900 flex items-center gap-2">
+                    <span>Sin PoE sin resolver</span>
+                    <span className="px-2 py-0.5 rounded-full text-xs font-mono font-bold bg-amber-200 text-amber-900">
+                      {blockSinPoeSinResolver.length}
+                    </span>
+                  </h3>
+                  <p className="text-[11px] text-slate-500 font-sans mt-0.5">
+                    Dispositivos conectados a puertos de switch sin entrega de PoE (estado_poe = 'sin_poe') que aún no tienen inyector ni fuente propia declarada (resuelto = false).
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs font-mono">
+                <thead className="bg-slate-50 border-b border-slate-200 text-[10px] text-slate-600 uppercase tracking-wider">
+                  <tr>
+                    <th className="py-2.5 px-4 w-32">Tipo</th>
+                    <th className="py-2.5 px-4">Código Dispositivo</th>
+                    <th className="py-2.5 px-4">Modelo</th>
+                    <th className="py-2.5 px-4">Edificio / Piso</th>
+                    <th className="py-2.5 px-4">Switch</th>
+                    <th className="py-2.5 px-4 text-center w-24">Puerto</th>
+                    <th className="py-2.5 px-4">Alimentación</th>
+                    <th className="py-2.5 px-4 text-center">Estado PoE</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {blockSinPoeSinResolver.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="py-8 text-center text-slate-400 font-sans text-xs">
+                        <CheckCircle2 className="w-6 h-6 text-emerald-500 mx-auto mb-1.5" />
+                        <span>No hay dispositivos en estado "Sin PoE sin resolver".</span>
+                      </td>
+                    </tr>
+                  ) : (
+                    blockSinPoeSinResolver.map((item, idx) => {
+                      const isCamara = item.tipo_dispositivo === 'camara';
+                      return (
+                        <tr key={`${item.codigo}-${item.puerto_switch_id}-${idx}`} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="py-2.5 px-4 whitespace-nowrap">
+                            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold ${
+                              isCamara ? 'bg-blue-100 text-blue-900 border border-blue-200' : 'bg-indigo-100 text-indigo-900 border border-indigo-200'
+                            }`}>
+                              {isCamara ? <Camera className="w-3 h-3 text-blue-600" /> : <Wifi className="w-3 h-3 text-indigo-600" />}
+                              <span>{isCamara ? 'Cámara CCTV' : 'WiFi AP'}</span>
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-4 font-bold text-slate-900 whitespace-nowrap">
+                            {item.codigo}
+                          </td>
+                          <td className="py-2.5 px-4 text-slate-700 whitespace-nowrap">
+                            {item.modelo || <span className="text-slate-400 italic font-sans text-[11px]">Sin modelo</span>}
+                          </td>
+                          <td className="py-2.5 px-4 text-slate-700">
+                            <span>{item.edificio || 'S/E'}</span>
+                            {item.piso && <span className="text-slate-400 text-[10px] block font-sans">{item.piso}</span>}
+                          </td>
+                          <td className="py-2.5 px-4 whitespace-nowrap font-bold text-slate-800">
+                            {item.switch_codigo}
+                          </td>
+                          <td className="py-2.5 px-4 text-center whitespace-nowrap">
+                            <span className="px-2 py-0.5 rounded font-mono font-bold bg-amber-100 text-amber-950 border border-amber-300 text-[11px]">
+                              #{item.numero_puerto}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-4 text-slate-600 text-[11px] font-sans">
+                            {getAlimentacionLabel(item.alimentacion)}
+                          </td>
+                          <td className="py-2.5 px-4 text-center whitespace-nowrap">
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-200">
+                              Sin PoE (Requiere inyector)
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* ======================================================== */}
+          {/* BLOQUE 2: RESUELTOS CON INYECTOR O FUENTE PROPIA         */}
+          {/* ======================================================== */}
+          <div className="bg-white border border-slate-200 rounded-xl shadow-2xs overflow-hidden">
+            <div className="p-4 border-b border-slate-200 bg-emerald-50/60 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-emerald-100 text-emerald-800 rounded-lg">
+                  <CheckCircle2 className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-mono font-bold text-sm text-slate-900 flex items-center gap-2">
+                    <span>Resueltos con inyector o fuente propia</span>
+                    <span className="px-2 py-0.5 rounded-full text-xs font-mono font-bold bg-emerald-200 text-emerald-900">
+                      {blockResueltos.length}
+                    </span>
+                  </h3>
+                  <p className="text-[11px] text-slate-500 font-sans mt-0.5">
+                    Dispositivos conectados a puertos sin PoE o con estándar insuficiente pero que tienen registrada alimentación externa (resuelto = true).
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs font-mono">
+                <thead className="bg-slate-50 border-b border-slate-200 text-[10px] text-slate-600 uppercase tracking-wider">
+                  <tr>
+                    <th className="py-2.5 px-4 w-32">Tipo</th>
+                    <th className="py-2.5 px-4">Código Dispositivo</th>
+                    <th className="py-2.5 px-4">Modelo</th>
+                    <th className="py-2.5 px-4">Edificio / Piso</th>
+                    <th className="py-2.5 px-4">Switch</th>
+                    <th className="py-2.5 px-4 text-center w-24">Puerto</th>
+                    <th className="py-2.5 px-4">Alimentación Declarada</th>
+                    <th className="py-2.5 px-4 text-center">Condición Resuelta</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {blockResueltos.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="py-8 text-center text-slate-400 font-sans text-xs">
+                        <span>No hay dispositivos registrados con inyector o fuente propia declarada.</span>
+                      </td>
+                    </tr>
+                  ) : (
+                    blockResueltos.map((item, idx) => {
+                      const isCamara = item.tipo_dispositivo === 'camara';
+                      return (
+                        <tr key={`${item.codigo}-${item.puerto_switch_id}-${idx}`} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="py-2.5 px-4 whitespace-nowrap">
+                            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold ${
+                              isCamara ? 'bg-blue-100 text-blue-900 border border-blue-200' : 'bg-indigo-100 text-indigo-900 border border-indigo-200'
+                            }`}>
+                              {isCamara ? <Camera className="w-3 h-3 text-blue-600" /> : <Wifi className="w-3 h-3 text-indigo-600" />}
+                              <span>{isCamara ? 'Cámara CCTV' : 'WiFi AP'}</span>
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-4 font-bold text-slate-900 whitespace-nowrap">
+                            {item.codigo}
+                          </td>
+                          <td className="py-2.5 px-4 text-slate-700 whitespace-nowrap">
+                            {item.modelo || <span className="text-slate-400 italic font-sans text-[11px]">Sin modelo</span>}
+                          </td>
+                          <td className="py-2.5 px-4 text-slate-700">
+                            <span>{item.edificio || 'S/E'}</span>
+                            {item.piso && <span className="text-slate-400 text-[10px] block font-sans">{item.piso}</span>}
+                          </td>
+                          <td className="py-2.5 px-4 whitespace-nowrap font-bold text-slate-800">
+                            {item.switch_codigo}
+                          </td>
+                          <td className="py-2.5 px-4 text-center whitespace-nowrap">
+                            <span className="px-2 py-0.5 rounded font-mono font-bold bg-slate-100 text-slate-800 border border-slate-300 text-[11px]">
+                              #{item.numero_puerto}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-4 text-emerald-800 font-bold text-[11px] whitespace-nowrap">
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-50 border border-emerald-200 rounded">
+                              ✓ {getAlimentacionLabel(item.alimentacion)}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-4 text-center whitespace-nowrap">
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                              {item.estado_poe === 'sin_poe' ? 'Puerto sin PoE solventado' : 'Estándar menor solventado'}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* ======================================================== */}
+          {/* BLOQUE 3: ESTÁNDAR INSUFICIENTE                          */}
+          {/* ======================================================== */}
+          <div className="bg-white border border-slate-200 rounded-xl shadow-2xs overflow-hidden">
+            <div className="p-4 border-b border-slate-200 bg-rose-50/60 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-rose-100 text-rose-800 rounded-lg">
+                  <AlertCircle className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-mono font-bold text-sm text-slate-900 flex items-center gap-2">
+                    <span>Estándar insuficiente</span>
+                    <span className="px-2 py-0.5 rounded-full text-xs font-mono font-bold bg-rose-200 text-rose-900">
+                      {blockEstandarInsuficiente.length}
+                    </span>
+                  </h3>
+                  <p className="text-[11px] text-slate-500 font-sans mt-0.5">
+                    Dispositivos cuyo estándar PoE requerido supera lo que entrega el puerto del switch (estado_poe = 'estandar_insuficiente') y no tienen alimentación externa declarada (resuelto = false).
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs font-mono">
+                <thead className="bg-slate-50 border-b border-slate-200 text-[10px] text-slate-600 uppercase tracking-wider">
+                  <tr>
+                    <th className="py-2.5 px-4 w-32">Tipo</th>
+                    <th className="py-2.5 px-4">Código Dispositivo</th>
+                    <th className="py-2.5 px-4">Modelo</th>
+                    <th className="py-2.5 px-4">Edificio / Piso</th>
+                    <th className="py-2.5 px-4">Switch & Puerto</th>
+                    <th className="py-2.5 px-4">Entrega Switch</th>
+                    <th className="py-2.5 px-4">Requiere Dispositivo</th>
+                    <th className="py-2.5 px-4">Alimentación</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {blockEstandarInsuficiente.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="py-8 text-center text-slate-400 font-sans text-xs">
+                        <CheckCircle2 className="w-6 h-6 text-emerald-500 mx-auto mb-1.5" />
+                        <span>No hay dispositivos con estándar PoE insuficiente.</span>
+                      </td>
+                    </tr>
+                  ) : (
+                    blockEstandarInsuficiente.map((item, idx) => {
+                      const isCamara = item.tipo_dispositivo === 'camara';
+                      return (
+                        <tr key={`${item.codigo}-${item.puerto_switch_id}-${idx}`} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="py-2.5 px-4 whitespace-nowrap">
+                            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold ${
+                              isCamara ? 'bg-blue-100 text-blue-900 border border-blue-200' : 'bg-indigo-100 text-indigo-900 border border-indigo-200'
+                            }`}>
+                              {isCamara ? <Camera className="w-3 h-3 text-blue-600" /> : <Wifi className="w-3 h-3 text-indigo-600" />}
+                              <span>{isCamara ? 'Cámara CCTV' : 'WiFi AP'}</span>
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-4 font-bold text-slate-900 whitespace-nowrap">
+                            {item.codigo}
+                          </td>
+                          <td className="py-2.5 px-4 text-slate-700 whitespace-nowrap">
+                            {item.modelo || <span className="text-slate-400 italic font-sans text-[11px]">Sin modelo</span>}
+                          </td>
+                          <td className="py-2.5 px-4 text-slate-700">
+                            <span>{item.edificio || 'S/E'}</span>
+                            {item.piso && <span className="text-slate-400 text-[10px] block font-sans">{item.piso}</span>}
+                          </td>
+                          <td className="py-2.5 px-4 whitespace-nowrap">
+                            <span className="font-bold text-slate-800">{item.switch_codigo}</span>
+                            <span className="ml-1.5 px-1.5 py-0.2 rounded font-mono font-bold bg-slate-100 text-slate-700 border border-slate-300 text-[11px]">
+                              #{item.numero_puerto}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-4 text-amber-800 font-semibold text-[11px] whitespace-nowrap">
+                            {getPoeEstandarLabel(item.estandar_switch) || 'Estándar menor'}
+                          </td>
+                          <td className="py-2.5 px-4 text-rose-800 font-bold text-[11px] whitespace-nowrap">
+                            {getPoeEstandarLabel(item.estandar_requerido) || 'Estándar mayor'}
+                          </td>
+                          <td className="py-2.5 px-4 text-slate-600 text-[11px] font-sans">
+                            {getAlimentacionLabel(item.alimentacion)}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

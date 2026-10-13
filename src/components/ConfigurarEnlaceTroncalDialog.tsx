@@ -12,13 +12,15 @@ import {
   CheckCircle2
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Equipo, PuertoSwitchOcupacion, formatRolRed } from '../types/database';
+import { Equipo, PuertoSwitchOcupacion, formatRolRed, formatSwitchPorts } from '../types/database';
 
 interface DestinationSwitchOption {
   id: string;
   codigo: string;
   modelo: string | null;
   rol_red: string | null;
+  puertos_totales?: number | null;
+  puertos_sfp_totales?: number | null;
   rack_id: string | null;
   rack?: {
     id: string;
@@ -62,8 +64,10 @@ export const ConfigurarEnlaceTroncalDialog: React.FC<ConfigurarEnlaceTroncalDial
   const [selectedDestPortId, setSelectedDestPortId] = useState<string>('');
   
   const [esPrincipal, setEsPrincipal] = useState<boolean>(true);
+  const [ignoraJerarquiaConfirmada, setIgnoraJerarquiaConfirmada] = useState<boolean>(false);
 
   // Load destination switches (excluding switchOrigen)
+  // "Ofrece como switch destino solo switches con rack (instalados) y con puertos SFP registrados. Si un switch no tiene puertos SFP, no lo ofrezcas como destino."
   useEffect(() => {
     if (!isOpen) return;
 
@@ -72,18 +76,35 @@ export const ConfigurarEnlaceTroncalDialog: React.FC<ConfigurarEnlaceTroncalDial
       try {
         setLoadingSwitches(true);
         setErrorMessage(null);
+        setIgnoraJerarquiaConfirmada(false);
 
-        const { data, error } = await supabase
+        // 1. Fetch switches that have a rack (instalados)
+        const { data: switchesData, error: swErr } = await supabase
           .from('equipos')
-          .select('id, codigo, modelo, rol_red, rack_id, rack:racks(id, codigo, ubicacion_especifica)')
+          .select('id, codigo, modelo, rol_red, puertos_totales, puertos_sfp_totales, rack_id, rack:racks(id, codigo, ubicacion_especifica)')
           .eq('tipo', 'switch')
+          .not('rack_id', 'is', null)
           .neq('id', switchOrigen.id)
           .order('codigo', { ascending: true });
 
-        if (error) throw error;
+        if (swErr) throw swErr;
+
+        // 2. Fetch distinct switch_ids that have SFP ports registered in puertos_switch
+        const { data: sfpData, error: sfpErr } = await supabase
+          .from('puertos_switch')
+          .select('switch_id')
+          .eq('tipo_puerto', 'sfp');
+
+        if (sfpErr) throw sfpErr;
+
+        const switchesWithSfpSet = new Set<string>((sfpData || []).map((p: any) => p.switch_id));
 
         if (isMounted) {
-          const list = (data as any[]) || [];
+          // Filter: must have rack_id AND registered SFP ports
+          const list = ((switchesData as any[]) || []).filter(
+            (sw) => sw.rack_id && switchesWithSfpSet.has(sw.id)
+          );
+
           setAvailableSwitches(list);
           if (list.length > 0) {
             setSelectedDestSwitchId(list[0].id);
@@ -178,6 +199,13 @@ export const ConfigurarEnlaceTroncalDialog: React.FC<ConfigurarEnlaceTroncalDial
 
   const selectedDestSwitch = availableSwitches.find(s => s.id === selectedDestSwitchId);
 
+  // Check if link jumps hierarchy (Acceso directly to Core in either direction)
+  const normOrigen = (switchOrigen.rol_red || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  const normDestino = (selectedDestSwitch?.rol_red || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  const saltaJerarquiaWarning =
+    (normOrigen === 'acceso' && normDestino === 'core') ||
+    (normOrigen === 'core' && normDestino === 'acceso');
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
@@ -192,8 +220,15 @@ export const ConfigurarEnlaceTroncalDialog: React.FC<ConfigurarEnlaceTroncalDial
       return;
     }
 
-    if (!selectedDestPortId) {
-      setErrorMessage('Seleccione un puerto SFP libre en el switch destino.');
+    // El puerto SFP destino es obligatorio; no permitas guardar sin él.
+    if (!selectedDestPortId || selectedDestPortId.trim() === '') {
+      setErrorMessage('El puerto SFP de destino es obligatorio. Seleccione un puerto SFP libre.');
+      return;
+    }
+
+    // Si salta jerarquía, exige marcar el checkbox de confirmación
+    if (saltaJerarquiaWarning && !ignoraJerarquiaConfirmada) {
+      setErrorMessage('Debe confirmar que comprende que no se respeta la jerarquía antes de establecer el enlace.');
       return;
     }
 
@@ -201,7 +236,6 @@ export const ConfigurarEnlaceTroncalDialog: React.FC<ConfigurarEnlaceTroncalDial
       setSubmitting(true);
 
       // Insert trunk link into enlaces_switch
-      // Note: ONLY use switch_origen_id, switch_destino_id, puerto_origen_id, puerto_destino_id, es_principal
       const { error } = await supabase
         .from('enlaces_switch')
         .insert({
@@ -213,7 +247,6 @@ export const ConfigurarEnlaceTroncalDialog: React.FC<ConfigurarEnlaceTroncalDial
         });
 
       if (error) {
-        // Map database error codes or constraints to clear human messages
         if (error.code === '23514' || error.message.includes('enlaces_switch_switches_distintos_chk')) {
           throw new Error('El switch de origen y el switch de destino deben ser diferentes.');
         }
@@ -337,9 +370,10 @@ export const ConfigurarEnlaceTroncalDialog: React.FC<ConfigurarEnlaceTroncalDial
                   {availableSwitches.map((sw) => {
                     const rackStr = sw.rack?.codigo ? `Rack: ${sw.rack.codigo}` : 'Sin Rack';
                     const rolStr = sw.rol_red ? `[${formatRolRed(sw.rol_red)}]` : '';
+                    const portStr = formatSwitchPorts(sw.puertos_totales, sw.puertos_sfp_totales);
                     return (
                       <option key={sw.id} value={sw.id}>
-                        {sw.codigo} {rolStr} · {rackStr} {sw.modelo ? `(${sw.modelo})` : ''}
+                        {sw.codigo} {rolStr} · {rackStr} {sw.modelo ? `(${sw.modelo})` : ''} · {portStr}
                       </option>
                     );
                   })}
@@ -351,6 +385,9 @@ export const ConfigurarEnlaceTroncalDialog: React.FC<ConfigurarEnlaceTroncalDial
                     <div className="flex items-center gap-2">
                       <Server className="w-3.5 h-3.5 text-slate-500" />
                       <span className="font-bold text-slate-800">{selectedDestSwitch.codigo}</span>
+                      <span className="text-[10px] text-slate-600 font-mono">
+                        ({formatSwitchPorts(selectedDestSwitch.puertos_totales, selectedDestSwitch.puertos_sfp_totales)})
+                      </span>
                       {selectedDestSwitch.rol_red ? (
                         <span className="text-[10px] font-sans font-semibold px-2 py-0.2 rounded bg-purple-100 text-purple-800 border border-purple-200">
                           {formatRolRed(selectedDestSwitch.rol_red)}
@@ -471,6 +508,30 @@ export const ConfigurarEnlaceTroncalDialog: React.FC<ConfigurarEnlaceTroncalDial
             </div>
           </div>
 
+          {/* Advertencia ámbar si el enlace salta la jerarquía (Acceso <-> Core) */}
+          {saltaJerarquiaWarning && (
+            <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-lg space-y-2.5 animate-in fade-in duration-150">
+              <div className="flex items-start gap-2.5">
+                <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                <div className="text-xs text-amber-950 font-sans leading-relaxed">
+                  <strong>Advertencia de jerarquía de red:</strong> Este enlace conecta un switch de Acceso directamente al Core, saltándose la capa de Distribución.
+                </div>
+              </div>
+              <label className="flex items-center gap-2 pt-1 border-t border-amber-200/80 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={ignoraJerarquiaConfirmada}
+                  onChange={(e) => setIgnoraJerarquiaConfirmada(e.target.checked)}
+                  disabled={submitting}
+                  className="rounded border-amber-400 text-amber-600 focus:ring-amber-500 w-4 h-4 cursor-pointer"
+                />
+                <span className="text-xs font-bold text-amber-900 font-sans">
+                  Entiendo que no se respeta la jerarquía
+                </span>
+              </label>
+            </div>
+          )}
+
           {/* Footer Buttons */}
           <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2.5">
             <button
@@ -483,9 +544,17 @@ export const ConfigurarEnlaceTroncalDialog: React.FC<ConfigurarEnlaceTroncalDial
             </button>
             <button
               type="submit"
-              disabled={submitting || !selectedDestPortId || destSfpPorts.length === 0}
+              disabled={
+                submitting ||
+                !selectedDestPortId ||
+                destSfpPorts.length === 0 ||
+                (saltaJerarquiaWarning && !ignoraJerarquiaConfirmada)
+              }
               className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-sm ${
-                submitting || !selectedDestPortId || destSfpPorts.length === 0
+                submitting ||
+                !selectedDestPortId ||
+                destSfpPorts.length === 0 ||
+                (saltaJerarquiaWarning && !ignoraJerarquiaConfirmada)
                   ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
                   : 'bg-amber-600 hover:bg-amber-700 text-white hover:shadow-md'
               }`}

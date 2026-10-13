@@ -15,6 +15,7 @@ import { ReportsView } from './components/ReportsView';
 import { NetworkPointsList } from './components/NetworkPointsList';
 import { NetworkPointDetail } from './components/NetworkPointDetail';
 import { NetworkPointForm } from './components/NetworkPointForm';
+import { TopologyView } from './components/TopologyView';
 import { supabase } from './lib/supabase';
 import { Rack, Camara, Equipo, PuntoRed } from './types/database';
 
@@ -446,6 +447,20 @@ export default function App() {
 
         {currentView === 'catalogos' && (
           <CatalogsView />
+        )}
+
+        {currentView === 'topologia' && (
+          <TopologyView
+            onNavigateToRack={handleNavigateToRackById}
+            onNavigateToPorts={(eqId) => handleNavigateToPorts(eqId)}
+            onOpenSwitchFicha={(switchId, rackId) => {
+              if (rackId) {
+                handleNavigateToRackById(rackId);
+              } else {
+                handleNavigateToPorts(switchId);
+              }
+            }}
+          />
         )}
       </main>
 

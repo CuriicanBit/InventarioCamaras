@@ -20,6 +20,8 @@ import {
   Trash2,
   Archive,
   AlertTriangle,
+  Zap,
+  Info,
   MapPin,
   Save,
   X,
@@ -45,6 +47,8 @@ import {
 import { MarcaSelect, ModeloSelect, ProveedorSelect } from './catalogs/CatalogSelectors';
 import { DecommissionModal } from './DecommissionModal';
 import { DeleteConfirmModal } from './DeleteConfirmModal';
+import { ALIMENTACION_OPTIONS, getAlimentacionLabel } from '../utils/poeUtils';
+import { PoeEvaluationNotice } from './PoeEvaluationNotice';
 
 interface CameraDetailProps {
   camera: Camara;
@@ -90,22 +94,40 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
   const [isEditing, setIsEditing] = useState(false);
   const [editFormData, setEditFormData] = useState<Partial<Camara>>({});
   const [editSwitchPorts, setEditSwitchPorts] = useState<PuertoSwitchOcupacion[]>([]);
+  const [editSwitchPoeMap, setEditSwitchPoeMap] = useState<Record<number, boolean | null>>({});
   const [occupiedPpPorts, setOccupiedPpPorts] = useState<{ [port: number]: string }>({});
   const [saving, setSaving] = useState(false);
 
-  // Load switch ports (RJ45 only, excluding SFP) when editing switch_id
+  // Load switch ports (RJ45 only, excluding SFP) and PoE when editing switch_id
   useEffect(() => {
     if (!editFormData.switch_id) {
       setEditSwitchPorts([]);
+      setEditSwitchPoeMap({});
       return;
     }
     const loadPorts = async () => {
       try {
-        const { data } = await supabase
-          .from('v_puertos_switch_ocupacion')
-          .select('*')
-          .eq('switch_id', editFormData.switch_id)
-          .order('numero_puerto');
+        const [
+          { data },
+          { data: poeData }
+        ] = await Promise.all([
+          supabase
+            .from('v_puertos_switch_ocupacion')
+            .select('*')
+            .eq('switch_id', editFormData.switch_id)
+            .order('numero_puerto'),
+          supabase
+            .from('v_puertos_switch_poe')
+            .select('numero_puerto, poe')
+            .eq('switch_id', editFormData.switch_id)
+        ]);
+
+        const pMap: Record<number, boolean | null> = {};
+        (poeData || []).forEach((r: any) => {
+          pMap[r.numero_puerto] = r.poe;
+        });
+        setEditSwitchPoeMap(pMap);
+
         // Exclude SFP ports for camera final device
         const rj45Only = (data || []).filter(p => p.tipo_puerto !== 'sfp');
         setEditSwitchPorts(rj45Only);
@@ -283,6 +305,7 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
       fecha_instalacion: currentCam.fecha_instalacion || '',
       proveedor_compra_id: currentCam.proveedor_compra_id || undefined,
       proveedor_instalacion_id: currentCam.proveedor_instalacion_id || undefined,
+      alimentacion: currentCam.alimentacion || '',
     });
     setIsEditing(true);
   };
@@ -482,6 +505,7 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
         fecha_instalacion: editFormData.fecha_instalacion?.trim() || null,
         proveedor_compra_id: editFormData.proveedor_compra_id || null,
         proveedor_instalacion_id: editFormData.proveedor_instalacion_id || null,
+        alimentacion: editFormData.alimentacion ? editFormData.alimentacion : null,
       };
 
       const { data, error } = await supabase
@@ -728,6 +752,12 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
               <div>
                 <span className="text-[10px] text-slate-500 uppercase block">ALTURA DE MONTAJE</span>
                 <span className="font-bold text-slate-800">{currentCam.altura_montaje_m || 2.8} m s.n.p.t.</span>
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-500 uppercase block">ALIMENTACIÓN</span>
+                <span className={`font-bold ${currentCam.alimentacion ? 'text-blue-900' : 'text-slate-500 italic'}`}>
+                  {getAlimentacionLabel(currentCam.alimentacion)}
+                </span>
               </div>
 
               {/* CAMPOS ESPECÍFICOS SEGÚN EL TIPO */}
@@ -1162,13 +1192,13 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                 </div>
 
                 {/* Parámetros ambientales y ópticos fijos */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1 border-t border-slate-200">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 pt-1 border-t border-slate-200">
                   <div>
                     <label className="block text-[11px] text-slate-600 mb-1">Ambiente</label>
                     <select
                       value={editFormData.ambiente || 'interior'}
                       onChange={(e) => setEditFormData({ ...editFormData, ambiente: e.target.value as any })}
-                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
                     >
                       <option value="interior">Interior</option>
                       <option value="exterior">Exterior</option>
@@ -1179,7 +1209,7 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                     <select
                       value={editFormData.antivandalico ? 'si' : 'no'}
                       onChange={(e) => setEditFormData({ ...editFormData, antivandalico: e.target.value === 'si' })}
-                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
                     >
                       <option value="si">Sí (IK10)</option>
                       <option value="no">No</option>
@@ -1212,6 +1242,19 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                       placeholder="2.8"
                       className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
                     />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-600 mb-1">Alimentación</label>
+                    <select
+                      value={editFormData.alimentacion || ''}
+                      onChange={(e) => setEditFormData({ ...editFormData, alimentacion: e.target.value as any })}
+                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs"
+                    >
+                      <option value="">Sin informar</option>
+                      {ALIMENTACION_OPTIONS.map(opt => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
                   </div>
                 </div>
 
@@ -1503,7 +1546,8 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                             const isOccupied = Boolean(p.ocupado_por_codigo) && p.ocupado_por_codigo !== currentCam.codigo;
                             const portVal = String(p.numero_puerto);
                             const vNum = p.vlan_numero ?? p.vlan;
-                            let label = `P.${p.numero_puerto} (Fa0/${p.numero_puerto})`;
+                            const isPoe = editSwitchPoeMap[p.numero_puerto] === true;
+                            let label = `${isPoe ? '⚡ ' : ''}P.${p.numero_puerto} (Fa0/${p.numero_puerto})`;
                             if (vNum) label += ` [VLAN ${vNum}]`;
                             if (isOccupied) label += ` · ✗ Ocupado (${p.ocupado_por_codigo})`;
                             else label += ` · ✓ Libre`;
@@ -1524,6 +1568,26 @@ export const CameraDetail: React.FC<CameraDetailProps> = ({
                         />
                       )}
                     </div>
+
+                    {/* Evaluación PoE según Requirement 1 y 3 */}
+                    {editFormData.switch_id && editFormData.puerto_switch && (() => {
+                      const pNumMatch = String(editFormData.puerto_switch).match(/\d+$/);
+                      const pNum = pNumMatch ? parseInt(pNumMatch[0], 10) : null;
+                      const matchedPort = editSwitchPorts.find(p => p.numero_puerto === pNum);
+                      const selectedModel = modelos.find(m => m.id === editFormData.modelo_id);
+
+                      return (
+                        <PoeEvaluationNotice
+                          puertoSwitchId={matchedPort?.puerto_switch_id || null}
+                          switchId={editFormData.switch_id}
+                          numeroPuerto={pNum}
+                          poeRequerido={selectedModel?.poe_requerido || null}
+                          alimentacion={editFormData.alimentacion || null}
+                          switchPoeEstandar={rackSwitches.find(s => s.id === editFormData.switch_id)?.poe_estandar || null}
+                          className="mt-2"
+                        />
+                      );
+                    })()}
                   </div>
 
                   {/* NVR */}

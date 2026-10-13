@@ -15,6 +15,8 @@ import {
   Calendar, 
   Check, 
   AlertCircle, 
+  AlertTriangle,
+  Zap,
   Plus, 
   Info,
   CheckCircle2
@@ -38,6 +40,8 @@ import {
 import { MarcaSelect, ModeloSelect, ProveedorSelect } from './catalogs/CatalogSelectors';
 import { NodeFormModal } from './TreeNodeModals';
 import { NodeLevel } from '../utils/treeHierarchy';
+import { ALIMENTACION_OPTIONS, getAlimentacionLabel } from '../utils/poeUtils';
+import { PoeEvaluationNotice } from './PoeEvaluationNotice';
 
 interface NetworkPointFormProps {
   initialPoint?: PuntoRed | null;
@@ -103,6 +107,7 @@ export const NetworkPointForm: React.FC<NetworkPointFormProps> = ({
   const [puertoPatch, setPuertoPatch] = useState<string>(initialPoint?.puerto_patch ? String(initialPoint.puerto_patch) : '1');
   const [selectedSwitchId, setSelectedSwitchId] = useState<string>(initialPoint?.switch_id || '');
   const [selectedPuertoSwitchId, setSelectedPuertoSwitchId] = useState<string>(initialPoint?.puerto_switch_id || '');
+  const [poeMap, setPoeMap] = useState<Record<number, boolean | null>>({});
   const [categoriaCable, setCategoriaCable] = useState<CategoriaCable>(initialPoint?.categoria_cable || 'cat6');
 
   // AP Hardware (only for wifi_ap)
@@ -111,6 +116,9 @@ export const NetworkPointForm: React.FC<NetworkPointFormProps> = ({
   const [numeroSerie, setNumeroSerie] = useState<string>(initialPoint?.numero_serie || '');
   const [direccionMac, setDireccionMac] = useState<string>(initialPoint?.direccion_mac || '');
   const [direccionIp, setDireccionIp] = useState<string>(initialPoint?.direccion_ip || '');
+  const [alimentacion, setAlimentacion] = useState<string>(initialPoint?.alimentacion || '');
+  const [alcanceMetros, setAlcanceMetros] = useState<string>(initialPoint?.alcance_metros !== null && initialPoint?.alcance_metros !== undefined ? String(initialPoint.alcance_metros) : '');
+  const [aperturaFov, setAperturaFov] = useState<string>(initialPoint?.apertura_fov !== null && initialPoint?.apertura_fov !== undefined ? String(initialPoint.apertura_fov) : '360');
 
   // Acquisition and Installation
   const [fechaCompra, setFechaCompra] = useState<string>(initialPoint?.fecha_compra || new Date().toISOString().slice(0, 10));
@@ -284,20 +292,37 @@ export const NetworkPointForm: React.FC<NetworkPointFormProps> = ({
   useEffect(() => {
     if (!selectedSwitchId) {
       setSwitchPorts([]);
+      setPoeMap({});
       return;
     }
 
     const loadPorts = async () => {
       try {
         setLoadingPorts(true);
-        // Query v_puertos_switch_ocupacion for accurate occupation status (ONLY RJ45 ports, exclude SFP)
-        const { data, error } = await supabase
-          .from('v_puertos_switch_ocupacion')
-          .select('*')
-          .eq('switch_id', selectedSwitchId)
-          .order('numero_puerto');
+        // Query v_puertos_switch_ocupacion and v_puertos_switch_poe for accurate status and PoE capabilities
+        const [
+          { data, error },
+          { data: poeData }
+        ] = await Promise.all([
+          supabase
+            .from('v_puertos_switch_ocupacion')
+            .select('*')
+            .eq('switch_id', selectedSwitchId)
+            .order('numero_puerto'),
+          supabase
+            .from('v_puertos_switch_poe')
+            .select('numero_puerto, poe')
+            .eq('switch_id', selectedSwitchId)
+        ]);
 
         if (error) throw error;
+
+        const pMap: Record<number, boolean | null> = {};
+        (poeData || []).forEach((r: any) => {
+          pMap[r.numero_puerto] = r.poe;
+        });
+        setPoeMap(pMap);
+
         // Exclude SFP ports - network points are final devices that only connect to RJ45
         const rj45Ports = (data || []).filter(p => p.tipo_puerto !== 'sfp');
         setSwitchPorts(rj45Ports);
@@ -386,12 +411,18 @@ export const NetworkPointForm: React.FC<NetworkPointFormProps> = ({
         payload.numero_serie = numeroSerie.trim() || null;
         payload.direccion_mac = direccionMac.trim() || null;
         payload.direccion_ip = direccionIp.trim() || null;
+        payload.alimentacion = alimentacion || null;
+        payload.alcance_metros = alcanceMetros.trim() !== '' ? parseFloat(alcanceMetros) : null;
+        payload.apertura_fov = aperturaFov.trim() !== '' ? parseInt(aperturaFov) : 360;
       } else {
         payload.marca_id = null;
         payload.modelo_id = null;
         payload.numero_serie = null;
         payload.direccion_mac = null;
         payload.direccion_ip = null;
+        payload.alimentacion = null;
+        payload.alcance_metros = null;
+        payload.apertura_fov = null;
       }
 
       let savedId = initialPoint?.id;
@@ -838,8 +869,9 @@ export const NetworkPointForm: React.FC<NetworkPointFormProps> = ({
                 {switchPorts.map(p => {
                   const isCurrentPointPort = isEditing && initialPoint?.puerto_switch_id === p.puerto_switch_id;
                   const isOccupied = Boolean(p.ocupado_por_codigo) && !isCurrentPointPort;
+                  const deliversPoe = poeMap[p.numero_puerto] === true;
 
-                  let label = `Puerto ${p.numero_puerto}`;
+                  let label = `${deliversPoe ? '⚡ ' : ''}Puerto ${p.numero_puerto}`;
                   const vNum = p.vlan_numero ?? p.vlan;
                   if (vNum) label += ` (VLAN ${vNum}${p.vlan_nombre ? ` - ${p.vlan_nombre}` : ''})`;
                   if (p.uso) label += ` [${p.uso}]`;
@@ -864,6 +896,17 @@ export const NetworkPointForm: React.FC<NetworkPointFormProps> = ({
                   );
                 })}
               </select>
+
+              {/* Evaluación PoE según Requirement 1 y 3 */}
+              {tipoPunto === 'wifi_ap' && selectedPuertoSwitchId && (
+                <PoeEvaluationNotice
+                  puertoSwitchId={selectedPuertoSwitchId}
+                  poeRequerido={modelos.find(m => m.id === modeloId)?.poe_requerido || null}
+                  alimentacion={alimentacion}
+                  switchPoeEstandar={switches.find(s => s.id === selectedSwitchId)?.poe_estandar || null}
+                  className="mt-2"
+                />
+              )}
 
               <div className="flex items-center justify-between text-[10px] text-slate-400 mt-1">
                 <span>Total: {switchPorts.length} puertos en switch</span>
@@ -915,11 +958,66 @@ export const NetworkPointForm: React.FC<NetworkPointFormProps> = ({
                   value={modeloId}
                   marcaId={marcaId}
                   tipoEquipo="access_point"
-                  onChange={(id) => setModeloId(id)}
+                  onChange={(id, _name, defaults) => {
+                    setModeloId(id);
+                    const m = defaults || modelos.find(mod => mod.id === id);
+                    if (m) {
+                      if (m.alcance_m_default !== undefined && m.alcance_m_default !== null) {
+                        setAlcanceMetros(String(m.alcance_m_default));
+                      }
+                      setAperturaFov('360');
+                    }
+                  }}
                   modelos={modelos}
                   marcas={marcas}
                   onModeloCreated={(newMod) => setModelos(prev => [...prev, newMod])}
                   required
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                  Alimentación
+                </label>
+                <select
+                  value={alimentacion}
+                  onChange={(e) => setAlimentacion(e.target.value)}
+                  className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white text-xs"
+                >
+                  <option value="">Sin informar</option>
+                  {ALIMENTACION_OPTIONS.map(opt => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                  Radio de Cobertura (m)
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  step="any"
+                  value={alcanceMetros}
+                  onChange={(e) => setAlcanceMetros(e.target.value)}
+                  placeholder="ej. 20"
+                  className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white text-xs font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                  Apertura FOV (°)
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="360"
+                  value={aperturaFov}
+                  onChange={(e) => setAperturaFov(e.target.value)}
+                  placeholder="360"
+                  className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white text-xs font-mono"
                 />
               </div>
 

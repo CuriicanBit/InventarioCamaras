@@ -8,6 +8,8 @@ import {
   HelpCircle,
   X,
   AlertTriangle,
+  Zap,
+  Info,
   Search,
   Plus,
   ArrowLeftRight,
@@ -17,7 +19,10 @@ import {
   MapPin,
   Tag
 } from 'lucide-react';
-import { PuntoRed, Camara } from '../types/database';
+import { supabase } from '../lib/supabase';
+import { PuntoRed, Camara, Modelo } from '../types/database';
+import { ALIMENTACION_OPTIONS, getAlimentacionLabel, getPoeEstandarLabel } from '../utils/poeUtils';
+import { PoeEvaluationNotice } from './PoeEvaluationNotice';
 
 export type ServicioKind =
   | 'datos_funcionario'
@@ -35,6 +40,7 @@ export interface AsociarServicioDialogProps {
   puerto_patch: number;
   codigo_switch: string;
   puerto_switch: number;
+  puerto_switch_id?: string | null;
   patchPanelId?: string;
   switchId?: string;
   // Props de VLAN (heredadas desde el puerto switch)
@@ -51,6 +57,8 @@ export interface AsociarServicioDialogProps {
     codigo: string;
     tipo_punto: ServicioKind;
     ubicacion?: string;
+    modelo_id?: string | null;
+    alimentacion?: string | null;
   }) => Promise<void> | void;
   onSelectExistentePunto?: (puntoId: string) => Promise<void> | void;
   onSelectExistenteCamara?: (camaraId: string) => Promise<void> | void;
@@ -165,6 +173,9 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
   puerto_patch,
   codigo_switch,
   puerto_switch,
+  puerto_switch_id,
+  patchPanelId,
+  switchId,
   vlan_id,
   vlan_numero,
   vlan_nombre,
@@ -195,11 +206,91 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
   // Formulario nuevo punto
   const [codigoPunto, setCodigoPunto] = useState<string>('');
   const [ubicacionPunto, setUbicacionPunto] = useState<string>('');
+  const [selectedModeloId, setSelectedModeloId] = useState<string>('');
+  const [selectedAlimentacion, setSelectedAlimentacion] = useState<string>('');
   const [isCodeManuallyEdited, setIsCodeManuallyEdited] = useState<boolean>(false);
+
+  // Catálogo de modelos
+  const [modelos, setModelos] = useState<Modelo[]>([]);
+
+  // Puerto switch y PoE
+  const [resolvedPortId, setResolvedPortId] = useState<string | null>(puerto_switch_id || null);
+  const [resolvedSwitchPoeEstandar, setResolvedSwitchPoeEstandar] = useState<string | null>(null);
 
   // Búsqueda en existentes
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedExistenteId, setSelectedExistenteId] = useState<string | null>(null);
+
+  // Estado de alimentación PoE del puerto switch
+  const [poeStatus, setPoeStatus] = useState<boolean | null>(null);
+
+  // Cargar modelos y resolver ID de puerto switch
+  useEffect(() => {
+    if (!isOpen) return;
+
+    supabase
+      .from('modelos')
+      .select('*, marca:marcas(*)')
+      .order('nombre')
+      .then(({ data }) => {
+        if (data) setModelos(data);
+      });
+
+    if (puerto_switch_id) {
+      setResolvedPortId(puerto_switch_id);
+    }
+
+    if (switchId && puerto_switch) {
+      supabase
+        .from('puertos_switch')
+        .select('id, switch:equipos(poe_estandar)')
+        .eq('switch_id', switchId)
+        .eq('numero_puerto', puerto_switch)
+        .maybeSingle()
+        .then(({ data }) => {
+          if (data) {
+            setResolvedPortId(data.id);
+            const sw: any = data.switch;
+            if (sw?.poe_estandar) {
+              setResolvedSwitchPoeEstandar(sw.poe_estandar);
+            }
+          }
+        });
+    }
+  }, [isOpen, switchId, puerto_switch, puerto_switch_id]);
+
+  // Consultar capacidad PoE del puerto switch en v_puertos_switch_poe
+  useEffect(() => {
+    if (!isOpen || !switchId || !puerto_switch) {
+      setPoeStatus(null);
+      return;
+    }
+    let isMounted = true;
+    const fetchPoe = async () => {
+      try {
+        const { data } = await supabase
+          .from('v_puertos_switch_poe')
+          .select('poe')
+          .eq('switch_id', switchId)
+          .eq('numero_puerto', puerto_switch)
+          .maybeSingle();
+
+        if (isMounted) {
+          setPoeStatus(data?.poe ?? null);
+        }
+      } catch {
+        if (isMounted) {
+          setPoeStatus(null);
+        }
+      }
+    };
+
+    fetchPoe();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen, switchId, puerto_switch]);
 
   // Sincronizar preselección al abrir o cambiar props
   useEffect(() => {
@@ -210,6 +301,8 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
       setConfirmNoVlan(false);
       setActiveTab('nuevo');
       setUbicacionPunto('');
+      setSelectedModeloId('');
+      setSelectedAlimentacion('');
       setSearchQuery('');
       setSelectedExistenteId(null);
       setIsCodeManuallyEdited(false);
@@ -250,6 +343,42 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
     }
     return puntosRed.length;
   }, [isCctvKind, camaras.length, puntosRed.length]);
+
+  // Deducir modelo y alimentación actuales según tab y selección
+  const { effectivePoeRequerido, effectiveAlimentacion, effectiveModelName } = useMemo(() => {
+    if (activeTab === 'nuevo') {
+      const mod = modelos.find(m => m.id === selectedModeloId);
+      return {
+        effectivePoeRequerido: mod?.poe_requerido || null,
+        effectiveAlimentacion: selectedAlimentacion || '',
+        effectiveModelName: mod?.nombre || null,
+      };
+    } else {
+      if (isCctvKind && selectedExistenteId) {
+        const cam = camaras.find(c => c.id === selectedExistenteId);
+        const mod = cam?.modelo_rel || (cam?.modelo_id ? modelos.find(m => m.id === cam?.modelo_id) : null);
+        return {
+          effectivePoeRequerido: mod?.poe_requerido || null,
+          effectiveAlimentacion: cam?.alimentacion || '',
+          effectiveModelName: mod?.nombre || cam?.modelo || null,
+        };
+      }
+      if (selectedKind === 'wifi_ap' && selectedExistenteId) {
+        const pto = puntosRed.find(p => p.id === selectedExistenteId);
+        const mod = pto?.modelo_rel || (pto?.modelo_id ? modelos.find(m => m.id === pto?.modelo_id) : null);
+        return {
+          effectivePoeRequerido: mod?.poe_requerido || null,
+          effectiveAlimentacion: pto?.alimentacion || '',
+          effectiveModelName: mod?.nombre || null,
+        };
+      }
+      return {
+        effectivePoeRequerido: null,
+        effectiveAlimentacion: '',
+        effectiveModelName: null,
+      };
+    }
+  }, [activeTab, selectedModeloId, selectedAlimentacion, isCctvKind, selectedKind, selectedExistenteId, camaras, puntosRed, modelos]);
 
   const filteredPuntos = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -332,6 +461,8 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
         codigo: codigoPunto.trim().toUpperCase(),
         tipo_punto: selectedKind,
         ubicacion: ubicacionPunto.trim() || undefined,
+        modelo_id: (selectedKind === 'wifi_ap' || selectedKind === 'camara_cctv') ? (selectedModeloId || null) : undefined,
+        alimentacion: (selectedKind === 'wifi_ap' || selectedKind === 'camara_cctv') ? (selectedAlimentacion || null) : undefined,
       });
       onClose();
       return;
@@ -432,12 +563,33 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
                 <span className="ml-1.5 px-1.5 py-0.2 rounded bg-blue-50 text-blue-800 border border-blue-200 font-bold text-[11px]">
                   P{String(puerto_switch).padStart(2, '0')}
                 </span>
+                {poeStatus === true && (
+                  <span 
+                    className="ml-1 px-1.5 py-0.2 rounded bg-amber-100 text-amber-900 border border-amber-300 font-bold text-[11px] inline-flex items-center gap-0.5" 
+                    title="Entrega alimentación PoE"
+                  >
+                    ⚡ PoE
+                  </span>
+                )}
               </div>
               <div className="p-1.5 rounded bg-blue-50 text-blue-700 border border-blue-200 shrink-0">
                 <Cpu className="w-4 h-4 text-blue-600" />
               </div>
             </div>
           </div>
+
+          {/* Aviso de evaluación PoE (si el tipo es AP WiFi o Cámara) */}
+          {(selectedKind === 'wifi_ap' || selectedKind === 'camara_cctv') && (resolvedPortId || (switchId && puerto_switch)) && (
+            <PoeEvaluationNotice
+              puertoSwitchId={resolvedPortId}
+              switchId={switchId}
+              numeroPuerto={puerto_switch}
+              poeRequerido={effectivePoeRequerido}
+              alimentacion={effectiveAlimentacion}
+              switchPoeEstandar={resolvedSwitchPoeEstandar}
+              className="mt-2.5"
+            />
+          )}
         </div>
 
         <div className="p-4 sm:p-5 space-y-4 max-h-[72vh] overflow-y-auto">
@@ -609,6 +761,7 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
             </div>
           </div>
 
+
           {/* ======================================================== */}
           {/* 4) BLOQUE: REGISTRO DEL PUNTO (Oculto si "Solo Cable")    */}
           {/* ======================================================== */}
@@ -693,6 +846,48 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
                       />
                     </div>
                   </div>
+
+                  {/* Campos adicionales de Modelo y Alimentación si es AP WiFi o Cámara */}
+                  {(selectedKind === 'wifi_ap' || selectedKind === 'camara_cctv') && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-200">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1">
+                          Modelo del Dispositivo (Opcional)
+                        </label>
+                        <select
+                          value={selectedModeloId}
+                          onChange={(e) => setSelectedModeloId(e.target.value)}
+                          className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-800 focus:ring-1 focus:ring-blue-500"
+                        >
+                          <option value="">(Sin modelo asignado)</option>
+                          {modelos
+                            .filter(m => selectedKind === 'wifi_ap' ? m.tipo_equipo === 'access_point' : m.tipo_equipo === 'camara')
+                            .map(m => (
+                              <option key={m.id} value={m.id}>
+                                {m.marca?.nombre ? `${m.marca.nombre} ` : ''}{m.nombre}
+                                {m.poe_requerido ? ` · [PoE: ${getPoeEstandarLabel(m.poe_requerido)}]` : ''}
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1">
+                          Alimentación
+                        </label>
+                        <select
+                          value={selectedAlimentacion}
+                          onChange={(e) => setSelectedAlimentacion(e.target.value)}
+                          className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-sans text-slate-800 focus:ring-1 focus:ring-blue-500"
+                        >
+                          <option value="">Sin informar</option>
+                          {ALIMENTACION_OPTIONS.map(opt => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 /* TAB: USAR EXISTENTE */
@@ -826,6 +1021,14 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
                       )
                     )}
                   </div>
+
+                  {/* Detalle del modelo y alimentación registrados para el elemento existente seleccionado */}
+                  {(selectedKind === 'wifi_ap' || selectedKind === 'camara_cctv') && selectedExistenteId && (
+                    <div className="p-2.5 bg-slate-100/70 border border-slate-200 rounded-lg text-[11px] text-slate-700 flex flex-wrap items-center justify-between gap-2 font-mono">
+                      <span>Modelo registrado: <strong>{effectiveModelName || 'No especificado'}</strong></span>
+                      <span>Alimentación: <strong>{getAlimentacionLabel(effectiveAlimentacion)}</strong></span>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

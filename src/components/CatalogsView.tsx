@@ -16,11 +16,20 @@ import {
   Link2Off,
   Filter,
   Layers,
-  Palette
+  Palette,
+  Zap
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Marca, Modelo, Proveedor, TipoEquipo, Vlan } from '../types/database';
+import { Marca, Modelo, Proveedor, TipoEquipo, Vlan, formatSwitchPorts } from '../types/database';
 import { EditarVlanDialog } from './EditarVlanDialog';
+import { 
+  parsePoePorts, 
+  getPoeSelectorMode,
+  POE_ESTANDAR_OPTIONS,
+  getPoeEstandarLabel,
+  WIFI_GENERACION_OPTIONS,
+  getWifiGeneracionLabel
+} from '../utils/poeUtils';
 
 export const CatalogsView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'marcas' | 'modelos' | 'proveedores' | 'vlans'>('marcas');
@@ -64,6 +73,7 @@ export const CatalogsView: React.FC = () => {
     nombre: string;
     tipo_equipo: string;
     puertos_default: string;
+    puertos_sfp_default: string;
     canales_default: string;
     capacidad_va_default: string;
     tipo_camara_default: string;
@@ -71,11 +81,18 @@ export const CatalogsView: React.FC = () => {
     resolucion_mp_default: string;
     apertura_fov_default: string;
     zoom_optico_default: string;
+    poe_puertos_default: string;
+    poe_estandar_default: string;
+    poe_presupuesto_w_default: string;
+    poe_requerido: string;
+    wifi_generacion: string;
+    alcance_m_default: string;
   }>({
     marca_id: '',
     nombre: '',
     tipo_equipo: 'switch',
     puertos_default: '',
+    puertos_sfp_default: '',
     canales_default: '',
     capacidad_va_default: '',
     tipo_camara_default: 'domo',
@@ -83,6 +100,12 @@ export const CatalogsView: React.FC = () => {
     resolucion_mp_default: '4',
     apertura_fov_default: '103',
     zoom_optico_default: '',
+    poe_puertos_default: '',
+    poe_estandar_default: '',
+    poe_presupuesto_w_default: '',
+    poe_requerido: '',
+    wifi_generacion: '',
+    alcance_m_default: '',
   });
 
   const [provForm, setProvForm] = useState<{
@@ -262,7 +285,8 @@ export const CatalogsView: React.FC = () => {
         marca_id: item.marca_id,
         nombre: item.nombre,
         tipo_equipo: item.tipo_equipo,
-        puertos_default: item.puertos_default ? String(item.puertos_default) : '',
+        puertos_default: item.puertos_default !== null && item.puertos_default !== undefined ? String(item.puertos_default) : '',
+        puertos_sfp_default: item.puertos_sfp_default !== null && item.puertos_sfp_default !== undefined ? String(item.puertos_sfp_default) : '',
         canales_default: item.canales_default ? String(item.canales_default) : '',
         capacidad_va_default: item.capacidad_va_default ? String(item.capacidad_va_default) : '',
         tipo_camara_default: item.tipo_camara_default || 'domo',
@@ -270,6 +294,12 @@ export const CatalogsView: React.FC = () => {
         resolucion_mp_default: item.resolucion_mp_default ? String(item.resolucion_mp_default) : '4',
         apertura_fov_default: item.apertura_fov_default ? String(item.apertura_fov_default) : '',
         zoom_optico_default: item.zoom_optico_default ? String(item.zoom_optico_default) : '',
+        poe_puertos_default: item.poe_puertos_default || '',
+        poe_estandar_default: item.poe_estandar_default || '',
+        poe_presupuesto_w_default: item.poe_presupuesto_w_default !== null && item.poe_presupuesto_w_default !== undefined ? String(item.poe_presupuesto_w_default) : '',
+        poe_requerido: item.poe_requerido || '',
+        wifi_generacion: item.wifi_generacion || '',
+        alcance_m_default: item.alcance_m_default !== null && item.alcance_m_default !== undefined ? String(item.alcance_m_default) : '',
       });
     } else {
       setModelForm({
@@ -277,6 +307,7 @@ export const CatalogsView: React.FC = () => {
         nombre: '',
         tipo_equipo: 'switch',
         puertos_default: '',
+        puertos_sfp_default: '',
         canales_default: '',
         capacidad_va_default: '',
         tipo_camara_default: 'domo',
@@ -284,6 +315,12 @@ export const CatalogsView: React.FC = () => {
         resolucion_mp_default: '4',
         apertura_fov_default: '103',
         zoom_optico_default: '',
+        poe_puertos_default: '',
+        poe_estandar_default: '',
+        poe_presupuesto_w_default: '',
+        poe_requerido: '',
+        wifi_generacion: '',
+        alcance_m_default: '',
       });
     }
     setModeloModal({ isOpen: true, mode, item });
@@ -296,16 +333,30 @@ export const CatalogsView: React.FC = () => {
 
     try {
       setActionLoading(true);
+      const isSwitch = modelForm.tipo_equipo === 'switch';
+      const isSwitchNonePoe = isSwitch && modelForm.poe_puertos_default.trim().toLowerCase() === 'ninguno';
+
       const payload: any = {
         marca_id: modelForm.marca_id,
         nombre: cleanNombre,
         tipo_equipo: modelForm.tipo_equipo,
-        puertos_default: modelForm.puertos_default ? parseInt(modelForm.puertos_default) : null,
+        puertos_default: modelForm.puertos_default.trim() !== '' ? parseInt(modelForm.puertos_default) : null,
+        puertos_sfp_default: isSwitch && modelForm.puertos_sfp_default.trim() !== '' ? parseInt(modelForm.puertos_sfp_default) : null,
+        poe_puertos_default: isSwitch && modelForm.poe_puertos_default.trim() !== '' ? modelForm.poe_puertos_default.trim() : null,
+        poe_estandar_default: isSwitch && !isSwitchNonePoe && modelForm.poe_estandar_default ? modelForm.poe_estandar_default : null,
+        poe_presupuesto_w_default: isSwitch && !isSwitchNonePoe && modelForm.poe_presupuesto_w_default.trim() !== '' ? parseFloat(modelForm.poe_presupuesto_w_default) : null,
         canales_default: modelForm.canales_default ? parseInt(modelForm.canales_default) : null,
         capacidad_va_default: modelForm.capacidad_va_default ? parseInt(modelForm.capacidad_va_default) : null,
       };
 
+      if (modelForm.tipo_equipo === 'access_point') {
+        payload.wifi_generacion = modelForm.wifi_generacion || null;
+        payload.poe_requerido = modelForm.poe_requerido || null;
+        payload.alcance_m_default = modelForm.alcance_m_default.trim() !== '' ? parseFloat(modelForm.alcance_m_default) : null;
+      }
+
       if (modelForm.tipo_equipo === 'camara') {
+        payload.poe_requerido = modelForm.poe_requerido || null;
         payload.tipo_camara_default = modelForm.tipo_camara_default || null;
         payload.lente_default = modelForm.lente_default.trim() || null;
         payload.resolucion_mp_default = modelForm.resolucion_mp_default ? parseFloat(modelForm.resolucion_mp_default) : null;
@@ -754,6 +805,8 @@ export const CatalogsView: React.FC = () => {
                       <th className="py-3 px-4">Modelo</th>
                       <th className="py-3 px-4">Marca Fabricante</th>
                       <th className="py-3 px-4">Tipo de Dispositivo</th>
+                      <th className="py-3 px-4">Generación Wi-Fi</th>
+                      <th className="py-3 px-4">PoE Requerido</th>
                       <th className="py-3 px-4">Valores por Defecto</th>
                       <th className="py-3 px-4">Uso</th>
                       <th className="py-3 px-4 text-right">Acciones</th>
@@ -762,7 +815,7 @@ export const CatalogsView: React.FC = () => {
                   <tbody className="divide-y divide-slate-100">
                     {filteredModelos.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="py-8 text-center text-slate-400">
+                        <td colSpan={8} className="py-8 text-center text-slate-400">
                           No se encontraron modelos registrados.
                         </td>
                       </tr>
@@ -784,13 +837,68 @@ export const CatalogsView: React.FC = () => {
                                 {mod.tipo_equipo.replace('_', ' ')}
                               </span>
                             </td>
+                            <td className="py-3 px-4 text-slate-600">
+                              {mod.tipo_equipo === 'access_point' ? (
+                                mod.wifi_generacion ? (
+                                  <span className="font-semibold text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200">
+                                    {getWifiGeneracionLabel(mod.wifi_generacion)}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400 italic">No especificada</span>
+                                )
+                              ) : (
+                                <span className="text-slate-300">-</span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-slate-600">
+                              {mod.poe_requerido ? (
+                                <span className="font-semibold text-amber-800 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                                  {getPoeEstandarLabel(mod.poe_requerido)}
+                                </span>
+                              ) : (
+                                <span className="text-slate-400 italic">
+                                  {mod.tipo_equipo === 'access_point' || mod.tipo_equipo === 'camara' ? 'No especificado' : '-'}
+                                </span>
+                              )}
+                            </td>
                             <td className="py-3 px-4 text-slate-600 text-[11px]">
-                              {mod.puertos_default && <span>{mod.puertos_default} Puertos RJ45</span>}
-                              {mod.canales_default && <span>{mod.canales_default} Canales NVR</span>}
-                              {mod.capacidad_va_default && <span>{mod.capacidad_va_default} VA</span>}
-                              {mod.tipo_camara_default && <span>Tipo {mod.tipo_camara_default} ({mod.resolucion_mp_default || 4}MP)</span>}
-                              {!mod.puertos_default && !mod.canales_default && !mod.capacidad_va_default && !mod.tipo_camara_default && (
-                                <span className="text-slate-400 italic">Estándar</span>
+                              {mod.tipo_equipo === 'switch' ? (
+                                <div className="space-y-0.5">
+                                  <span className="font-semibold text-slate-800 block">
+                                    {formatSwitchPorts(mod.puertos_default, mod.puertos_sfp_default)}
+                                  </span>
+                                  {(() => {
+                                    const poeInfo = parsePoePorts(mod.poe_puertos_default, mod.puertos_default);
+                                    return (
+                                      <span className={`text-[10px] block ${poeInfo.isDefined ? 'text-amber-700 font-bold' : 'text-slate-400 italic'}`}>
+                                        {poeInfo.isDefined ? '⚡ ' : ''}{poeInfo.summaryText}
+                                      </span>
+                                    );
+                                  })()}
+                                  {(mod.poe_estandar_default || mod.poe_presupuesto_w_default) && (
+                                    <span className="text-[10px] text-slate-500 block">
+                                      {mod.poe_estandar_default ? getPoeEstandarLabel(mod.poe_estandar_default) : ''}
+                                      {mod.poe_estandar_default && mod.poe_presupuesto_w_default ? ' · ' : ''}
+                                      {mod.poe_presupuesto_w_default ? `${mod.poe_presupuesto_w_default} W` : ''}
+                                    </span>
+                                  )}
+                                </div>
+                              ) : mod.tipo_equipo === 'access_point' ? (
+                                <div className="space-y-0.5">
+                                  <span className="font-semibold text-slate-800 block">
+                                    Radio: {mod.alcance_m_default ? `${mod.alcance_m_default} m` : 'No definido'}
+                                  </span>
+                                </div>
+                              ) : (
+                                <>
+                                  {mod.puertos_default && <span>{mod.puertos_default} Puertos</span>}
+                                  {mod.canales_default && <span>{mod.canales_default} Canales NVR</span>}
+                                  {mod.capacidad_va_default && <span>{mod.capacidad_va_default} VA</span>}
+                                  {mod.tipo_camara_default && <span>Tipo {mod.tipo_camara_default} ({mod.resolucion_mp_default || 4}MP)</span>}
+                                  {!mod.puertos_default && !mod.canales_default && !mod.capacidad_va_default && !mod.tipo_camara_default && (
+                                    <span className="text-slate-400 italic">Estándar</span>
+                                  )}
+                                </>
                               )}
                             </td>
                             <td className="py-3 px-4">
@@ -1122,6 +1230,7 @@ export const CatalogsView: React.FC = () => {
                     className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white text-xs"
                   >
                     <option value="switch">Switch</option>
+                    <option value="access_point">Access Point (AP Wi-Fi)</option>
                     <option value="patch_panel">Patch Panel</option>
                     <option value="nvr">Grabador NVR</option>
                     <option value="ups">Sistema UPS</option>
@@ -1146,10 +1255,238 @@ export const CatalogsView: React.FC = () => {
               </div>
 
               {/* Dynamic Optional Defaults */}
-              {(modelForm.tipo_equipo === 'switch' || modelForm.tipo_equipo === 'patch_panel') && (
+              {modelForm.tipo_equipo === 'switch' && (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11px] text-slate-600 mb-1">
+                        Puertos RJ45 por defecto
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="96"
+                        value={modelForm.puertos_default}
+                        onChange={(e) => setModelForm({ ...modelForm, puertos_default: e.target.value })}
+                        placeholder="ej. 24 (o 0)"
+                        className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs bg-white font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-600 mb-1">
+                        Puertos SFP por defecto
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="48"
+                        value={modelForm.puertos_sfp_default}
+                        onChange={(e) => setModelForm({ ...modelForm, puertos_sfp_default: e.target.value })}
+                        placeholder="ej. 4 (o 0)"
+                        className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs bg-white font-mono"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-slate-400 font-sans">
+                    Al seleccionar este modelo en el montaje de switches, se autocompletarán ambos campos automáticamente.
+                  </p>
+
+                  {/* Puertos PoE por defecto */}
+                  <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2 mt-2">
+                    <div className="flex items-center justify-between">
+                      <label className="block text-[11px] font-bold text-slate-700 flex items-center gap-1.5">
+                        <Zap className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Puertos PoE por defecto</span>
+                      </label>
+                      {/* Resumen "PoE: N de M puertos" */}
+                      {(() => {
+                        const totalRj45 = parseInt(modelForm.puertos_default, 10) || 0;
+                        const poeInfo = parsePoePorts(modelForm.poe_puertos_default, totalRj45);
+                        return (
+                          <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold border ${
+                            poeInfo.isDefined
+                              ? 'bg-amber-100 text-amber-900 border-amber-300'
+                              : 'bg-white text-slate-500 border-slate-200 italic'
+                          }`}>
+                            {poeInfo.isDefined ? '⚡ ' : ''}{poeInfo.summaryText}
+                          </span>
+                        );
+                      })()}
+                    </div>
+
+                    {/* Selector rápido [Todos | Ninguno | Rangos] */}
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => setModelForm({ ...modelForm, poe_puertos_default: 'todos' })}
+                        className={`px-2.5 py-1 text-[11px] font-bold rounded border transition-colors cursor-pointer ${
+                          modelForm.poe_puertos_default.trim().toLowerCase() === 'todos'
+                            ? 'bg-amber-600 text-white border-amber-600 shadow-2xs'
+                            : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                        }`}
+                      >
+                        Todos
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setModelForm({ ...modelForm, poe_puertos_default: 'ninguno' })}
+                        className={`px-2.5 py-1 text-[11px] font-bold rounded border transition-colors cursor-pointer ${
+                          modelForm.poe_puertos_default.trim().toLowerCase() === 'ninguno'
+                            ? 'bg-slate-700 text-white border-slate-700 shadow-2xs'
+                            : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                        }`}
+                      >
+                        Ninguno
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const cur = modelForm.poe_puertos_default.trim().toLowerCase();
+                          if (cur === 'todos' || cur === 'ninguno' || cur === '') {
+                            setModelForm({ ...modelForm, poe_puertos_default: '1-8,17-24' });
+                          }
+                        }}
+                        className={`px-2.5 py-1 text-[11px] font-bold rounded border transition-colors cursor-pointer ${
+                          getPoeSelectorMode(modelForm.poe_puertos_default) === 'rangos'
+                            ? 'bg-blue-600 text-white border-blue-600 shadow-2xs'
+                            : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                        }`}
+                      >
+                        Rangos
+                      </button>
+                      {modelForm.poe_puertos_default && (
+                        <button
+                          type="button"
+                          onClick={() => setModelForm({ ...modelForm, poe_puertos_default: '' })}
+                          className="ml-auto text-[10px] text-slate-400 hover:text-rose-600 underline cursor-pointer"
+                          title="Dejar sin definir"
+                        >
+                          Dejar sin definir
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Campo de texto en modo Rangos */}
+                    {getPoeSelectorMode(modelForm.poe_puertos_default) === 'rangos' && (
+                      <div className="space-y-1 pt-1">
+                        <input
+                          type="text"
+                          value={modelForm.poe_puertos_default}
+                          onChange={(e) => setModelForm({ ...modelForm, poe_puertos_default: e.target.value })}
+                          placeholder="1-8,17-24"
+                          className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs bg-white font-mono"
+                        />
+                        <p className="text-[10px] text-slate-500 font-sans">
+                          Especifique puertos o rangos separados por coma (ejemplo: <strong>1-8,17-24</strong> o <strong>1, 3-5</strong>).
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Validación en pantalla */}
+                    {(() => {
+                      const totalRj45 = parseInt(modelForm.puertos_default, 10) || 0;
+                      const res = parsePoePorts(modelForm.poe_puertos_default, totalRj45);
+                      if (!res.valid && res.error) {
+                        return (
+                          <div className="text-[11px] text-rose-600 font-bold flex items-center gap-1 pt-0.5">
+                            <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                            <span>{res.error}</span>
+                          </div>
+                        );
+                      }
+                      return null;
+                    })()}
+
+                    {/* Estándar PoE y Presupuesto PoE total (ocultos si es 'ninguno') */}
+                    {modelForm.poe_puertos_default.trim().toLowerCase() !== 'ninguno' && (
+                      <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-200">
+                        <div>
+                          <label className="block text-[11px] text-slate-600 mb-1">
+                            Estándar PoE que entrega
+                          </label>
+                          <select
+                            value={modelForm.poe_estandar_default}
+                            onChange={(e) => setModelForm({ ...modelForm, poe_estandar_default: e.target.value })}
+                            className="w-full px-2.5 py-1.5 border border-slate-300 rounded text-xs bg-white"
+                          >
+                            <option value="">Seleccione estándar...</option>
+                            {POE_ESTANDAR_OPTIONS.map(opt => (
+                              <option key={opt.value} value={opt.value}>{opt.label}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-600 mb-1">
+                            Presupuesto PoE total (W)
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="any"
+                            value={modelForm.poe_presupuesto_w_default}
+                            onChange={(e) => setModelForm({ ...modelForm, poe_presupuesto_w_default: e.target.value })}
+                            placeholder="ej. 370"
+                            className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs bg-white font-mono"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {modelForm.tipo_equipo === 'access_point' && (
+                <div className="space-y-3 bg-indigo-50/50 p-3 rounded-lg border border-indigo-200">
+                  <span className="text-[10px] uppercase font-bold text-indigo-800 tracking-wider block">
+                    Valores por Defecto de Access Point (Opcionales)
+                  </span>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11px] text-slate-600 mb-1">Generación Wi-Fi</label>
+                      <select
+                        value={modelForm.wifi_generacion}
+                        onChange={(e) => setModelForm({ ...modelForm, wifi_generacion: e.target.value })}
+                        className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs bg-white"
+                      >
+                        <option value="">Seleccione generación...</option>
+                        {WIFI_GENERACION_OPTIONS.map(opt => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-600 mb-1">PoE requerido</label>
+                      <select
+                        value={modelForm.poe_requerido}
+                        onChange={(e) => setModelForm({ ...modelForm, poe_requerido: e.target.value })}
+                        className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs bg-white"
+                      >
+                        <option value="">Seleccione estándar...</option>
+                        {POE_ESTANDAR_OPTIONS.map(opt => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-600 mb-1">Radio de cobertura por defecto (m)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      step="any"
+                      value={modelForm.alcance_m_default}
+                      onChange={(e) => setModelForm({ ...modelForm, alcance_m_default: e.target.value })}
+                      placeholder="ej. 20"
+                      className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs bg-white font-mono"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {modelForm.tipo_equipo === 'patch_panel' && (
                 <div>
                   <label className="block text-[11px] text-slate-600 mb-1">
-                    Puertos RJ45 por Defecto
+                    Puertos Totales por Defecto
                   </label>
                   <input
                     type="number"
@@ -1157,10 +1494,10 @@ export const CatalogsView: React.FC = () => {
                     max="96"
                     value={modelForm.puertos_default}
                     onChange={(e) => setModelForm({ ...modelForm, puertos_default: e.target.value })}
-                    placeholder="24"
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs"
+                    placeholder="24 o 48"
+                    className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs bg-white font-mono"
                   />
-                  <p className="text-[10px] text-slate-400 mt-1">
+                  <p className="text-[10px] text-slate-400 mt-1 font-sans">
                     Al seleccionar este modelo en el montaje, se autocompletará este campo automáticamente.
                   </p>
                 </div>
@@ -1205,7 +1542,7 @@ export const CatalogsView: React.FC = () => {
                   <span className="text-[10px] uppercase font-bold text-blue-800 tracking-wider block">
                     Valores por Defecto de Cámara (Opcionales)
                   </span>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-3 gap-3">
                     <div>
                       <label className="block text-[11px] text-slate-600 mb-1">Tipo de Cámara</label>
                       <select
@@ -1230,6 +1567,19 @@ export const CatalogsView: React.FC = () => {
                         placeholder="4"
                         className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs bg-white"
                       />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-600 mb-1">PoE requerido</label>
+                      <select
+                        value={modelForm.poe_requerido}
+                        onChange={(e) => setModelForm({ ...modelForm, poe_requerido: e.target.value })}
+                        className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs bg-white"
+                      >
+                        <option value="">Seleccione estándar...</option>
+                        {POE_ESTANDAR_OPTIONS.map(opt => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
                     </div>
                   </div>
 

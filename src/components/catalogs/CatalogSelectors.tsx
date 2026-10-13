@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Plus, Check, X, Tag, Cpu, Building, AlertCircle, Info, Layers, Palette } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
-import { Marca, Modelo, Proveedor, TipoEquipo, Vlan } from '../../types/database';
+import { Marca, Modelo, Proveedor, TipoEquipo, Vlan, formatSwitchPorts } from '../../types/database';
 
 // Helper to format Supabase error messages
 function formatError(err: unknown): string {
@@ -304,6 +304,7 @@ export const ModeloSelect: React.FC<ModeloSelectProps> = ({
   const [isOpen, setIsOpen] = useState(false);
   const [newNombre, setNewNombre] = useState('');
   const [puertos, setPuertos] = useState<string>('');
+  const [puertosSfp, setPuertosSfp] = useState<string>('');
   const [canales, setCanales] = useState<string>('');
   const [capacidadVa, setCapacidadVa] = useState<string>('');
   const [tipoCamara, setTipoCamara] = useState<string>('domo');
@@ -374,7 +375,8 @@ export const ModeloSelect: React.FC<ModeloSelectProps> = ({
         marca_id: marcaId,
         nombre: cleanNombre,
         tipo_equipo: tipoEquipo, // MUST be the internal value
-        puertos_default: puertos ? parseInt(puertos) : null,
+        puertos_default: puertos.trim() !== '' ? parseInt(puertos) : null,
+        puertos_sfp_default: tipoEquipo === 'switch' && puertosSfp.trim() !== '' ? parseInt(puertosSfp) : null,
         canales_default: canales ? parseInt(canales) : null,
         capacidad_va_default: capacidadVa ? parseInt(capacidadVa) : null,
       };
@@ -451,7 +453,9 @@ export const ModeloSelect: React.FC<ModeloSelectProps> = ({
               {availableModelos.map(m => (
                 <option key={m.id} value={m.id}>
                   {m.nombre}
-                  {m.puertos_default ? ` (${m.puertos_default}P)` : ''}
+                  {m.tipo_equipo === 'switch'
+                    ? ` (${formatSwitchPorts(m.puertos_default, m.puertos_sfp_default)})`
+                    : m.puertos_default ? ` (${m.puertos_default}P)` : ''}
                   {m.canales_default ? ` (${m.canales_default}Ch)` : ''}
                   {m.tipo_camara_default ? ` [${m.tipo_camara_default}]` : ''}
                 </option>
@@ -564,9 +568,38 @@ export const ModeloSelect: React.FC<ModeloSelectProps> = ({
           </div>
 
           {/* Dynamic equipment defaults */}
-          {(tipoEquipo === 'switch' || tipoEquipo === 'patch_panel') && (
+          {tipoEquipo === 'switch' && (
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[11px] text-slate-600 mb-1">Puertos RJ45 por defecto</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="96"
+                  value={puertos}
+                  onChange={(e) => setPuertos(e.target.value)}
+                  placeholder="24 (o 0)"
+                  className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-slate-600 mb-1">Puertos SFP por defecto</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="48"
+                  value={puertosSfp}
+                  onChange={(e) => setPuertosSfp(e.target.value)}
+                  placeholder="4 (o 0)"
+                  className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs font-mono"
+                />
+              </div>
+            </div>
+          )}
+
+          {tipoEquipo === 'patch_panel' && (
             <div>
-              <label className="block text-[11px] text-slate-600 mb-1">Puertos RJ45 por Defecto (Opcional)</label>
+              <label className="block text-[11px] text-slate-600 mb-1">Puertos por Defecto (Opcional)</label>
               <input
                 type="number"
                 min="1"

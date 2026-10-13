@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { 
   Building2, 
   MapPin, 
@@ -23,10 +23,13 @@ import {
   Wrench,
   Clock,
   ShieldCheck,
-  Tag
+  Tag,
+  ChevronsDown,
+  ChevronsUp,
+  X
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Sede, Campus, Edificio, Piso, Rack, Equipo, Camara, HistorialMantenimiento, TipoIntervencion } from '../types/database';
+import { Sede, Campus, Edificio, Piso, Rack, Equipo, Camara, PuntoRed, HistorialMantenimiento, TipoIntervencion } from '../types/database';
 import { NodeFormModal, DeleteSafetyModal } from './TreeNodeModals';
 import { NodeLevel } from '../utils/treeHierarchy';
 import { MaintenanceHistory } from './MaintenanceHistory';
@@ -67,16 +70,13 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
   const [racks, setRacks] = useState<Rack[]>([]);
   const [equipos, setEquipos] = useState<Equipo[]>([]);
   const [camaras, setCamaras] = useState<Camara[]>([]);
+  const [puntosRed, setPuntosRed] = useState<Pick<PuntoRed, 'id' | 'rack_id'>[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchFilter, setSearchFilter] = useState<string>('');
+  const [soloRamasConRacks, setSoloRamasConRacks] = useState<boolean>(false);
 
   // Expanded tree nodes
-  const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({
-    'sede-default': true,
-    'campus-default': true,
-    'edif-default': true,
-    'piso-default': true,
-  });
+  const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({});
 
   // Current selected rack
   const [currentRack, setCurrentRack] = useState<Rack | null>(null);
@@ -299,6 +299,7 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
         { data: rData },
         { data: eqData },
         { data: camData },
+        { data: prData },
         { data: unassignedData },
       ] = await Promise.all([
         supabase.from('sedes').select('*').order('nombre'),
@@ -308,6 +309,7 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
         supabase.from('racks').select('*').order('codigo'),
         supabase.from('equipos').select('*').order('posicion_u_inicio', { ascending: false }),
         supabase.from('camaras').select('*').order('codigo'),
+        supabase.from('puntos_red').select('id, rack_id'),
         supabase.from('v_sin_asignar').select('id'),
       ]);
 
@@ -324,6 +326,7 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
       const loadedCamaras = (camData || []).filter(
         c => !c.estado_ciclo_vida || c.estado_ciclo_vida === 'instalado'
       );
+      const loadedPuntosRed = prData || [];
 
       setSedes(loadedSedes);
       setCampusList(loadedCampus);
@@ -332,6 +335,7 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
       setRacks(loadedRacks);
       setEquipos(loadedEquipos);
       setCamaras(loadedCamaras);
+      setPuntosRed(loadedPuntosRed);
 
       // Handle rack selection
       const targetRackId = preferredRackId || selectedRackId || currentRack?.id;
@@ -343,21 +347,15 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
       setCurrentRack(targetRack);
       if (targetRack) {
         onSelectRack(targetRack);
-
-        // Expand tree ancestors for this rack
-        const p = loadedPisos.find(pi => pi.id === targetRack?.piso_id);
-        const ed = loadedEdificios.find(e => e.id === p?.edificio_id);
-        const camp = loadedCampus.find(c => c.id === ed?.campus_id);
-        const sed = loadedSedes.find(s => s.id === camp?.sede_id);
-
-        setExpandedNodes(prev => ({
-          ...prev,
-          [`sede-${sed?.id}`]: true,
-          [`campus-${camp?.id}`]: true,
-          [`edificio-${ed?.id}`]: true,
-          [`piso-${p?.id}`]: true,
-        }));
       }
+
+      // Initial tree expansion: expand all nodes by default
+      const initialExpanded: Record<string, boolean> = {};
+      loadedSedes.forEach(s => { initialExpanded[`sede-${s.id}`] = true; });
+      loadedCampus.forEach(c => { initialExpanded[`campus-${c.id}`] = true; });
+      loadedEdificios.forEach(e => { initialExpanded[`edificio-${e.id}`] = true; });
+      loadedPisos.forEach(p => { initialExpanded[`piso-${p.id}`] = true; });
+      setExpandedNodes(initialExpanded);
     } catch (err) {
       console.error('Error loading physical tree:', err);
     } finally {
@@ -438,11 +436,270 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
   const totalU = currentRack?.altura_u || 42;
   const availableU = Math.max(0, totalU - occupiedU);
 
-  // Tree filter logic
-  const matchesSearch = (text: string) => {
-    if (!searchFilter.trim()) return true;
-    return text.toLowerCase().includes(searchFilter.toLowerCase().trim());
-  };
+  // 1. Real data sets for CCTV and Datos tags
+  // CCTV: camaras.rack_id exists
+  // Datos: puntos_red.rack_id exists OR switch is mounted in rack
+  const cctvRackIds = useMemo(() => {
+    const set = new Set<string>();
+    camaras.forEach(c => {
+      if (c.rack_id) set.add(c.rack_id);
+    });
+    return set;
+  }, [camaras]);
+
+  const datosRackIds = useMemo(() => {
+    const set = new Set<string>();
+    puntosRed.forEach(p => {
+      if (p.rack_id) set.add(p.rack_id);
+    });
+    equipos.forEach(e => {
+      const tipo = e.tipo ? String(e.tipo).toLowerCase().trim() : '';
+      if (e.rack_id && tipo === 'switch') set.add(e.rack_id);
+    });
+    return set;
+  }, [puntosRed, equipos]);
+
+  // 2. Hierarchy sets for "Solo ramas con racks" filter
+  const { pisoIdsWithRacks, edificioIdsWithRacks, campusIdsWithRacks, sedeIdsWithRacks } = useMemo(() => {
+    const pSet = new Set<string>();
+    racks.forEach(r => {
+      if (r.piso_id) pSet.add(r.piso_id);
+    });
+
+    const edSet = new Set<string>();
+    pisos.forEach(p => {
+      if (pSet.has(p.id) && p.edificio_id) edSet.add(p.edificio_id);
+    });
+
+    const campSet = new Set<string>();
+    edificios.forEach(e => {
+      if (edSet.has(e.id) && e.campus_id) campSet.add(e.campus_id);
+    });
+
+    const sedeSet = new Set<string>();
+    campusList.forEach(c => {
+      if (campSet.has(c.id) && c.sede_id) sedeSet.add(c.sede_id);
+    });
+
+    return {
+      pisoIdsWithRacks: pSet,
+      edificioIdsWithRacks: edSet,
+      campusIdsWithRacks: campSet,
+      sedeIdsWithRacks: sedeSet,
+    };
+  }, [racks, pisos, edificios, campusList]);
+
+  // 3. Expand / Collapse all handlers
+  const handleExpandAll = useCallback(() => {
+    const next: Record<string, boolean> = {};
+    sedes.forEach(s => { next[`sede-${s.id}`] = true; });
+    campusList.forEach(c => { next[`campus-${c.id}`] = true; });
+    edificios.forEach(e => { next[`edificio-${e.id}`] = true; });
+    pisos.forEach(p => { next[`piso-${p.id}`] = true; });
+    setExpandedNodes(next);
+  }, [sedes, campusList, edificios, pisos]);
+
+  const handleCollapseAll = useCallback(() => {
+    setExpandedNodes({});
+  }, []);
+
+  // 4. Text search matching & highlight helper
+  const searchLower = searchFilter.trim().toLowerCase();
+
+  const highlightMatch = useCallback((text: string | null | undefined, _overrideQuery?: string): React.ReactNode => {
+    if (!text) return null;
+    const query = _overrideQuery !== undefined ? _overrideQuery.trim().toLowerCase() : searchLower;
+    if (!query) return text;
+
+    const lowerText = text.toLowerCase();
+    if (!lowerText.includes(query)) return text;
+
+    const parts: React.ReactNode[] = [];
+    let startIndex = 0;
+    let keyIdx = 0;
+
+    while (startIndex < text.length) {
+      const matchIndex = lowerText.indexOf(query, startIndex);
+      if (matchIndex === -1) {
+        parts.push(text.substring(startIndex));
+        break;
+      }
+      if (matchIndex > startIndex) {
+        parts.push(text.substring(startIndex, matchIndex));
+      }
+      parts.push(
+        <mark
+          key={`m-${matchIndex}-${keyIdx++}`}
+          className="bg-amber-200 text-amber-950 font-bold px-0.5 rounded-xs"
+        >
+          {text.substring(matchIndex, matchIndex + query.length)}
+        </mark>
+      );
+      startIndex = matchIndex + query.length;
+    }
+
+    return <>{parts}</>;
+  }, [searchLower]);
+
+  // Subtree matching sets for filtering with bidirectional propagation
+  const {
+    matchingPisoIds,
+    matchingEdificioIds,
+    matchingCampusIds,
+    matchingSedeIds,
+    matchingRackIds,
+    nodesToExpandOnSearch
+  } = useMemo(() => {
+    if (!searchLower) {
+      return {
+        matchingPisoIds: null,
+        matchingEdificioIds: null,
+        matchingCampusIds: null,
+        matchingSedeIds: null,
+        matchingRackIds: null,
+        nodesToExpandOnSearch: null,
+      };
+    }
+
+    // Direct text matches
+    const directRackMatches = new Set<string>();
+    racks.forEach(r => {
+      const codeMatch = r.codigo.toLowerCase().includes(searchLower);
+      const ubiMatch = r.ubicacion_especifica ? r.ubicacion_especifica.toLowerCase().includes(searchLower) : false;
+      if (codeMatch || ubiMatch) directRackMatches.add(r.id);
+    });
+
+    const directPisoMatches = new Set<string>();
+    pisos.forEach(p => {
+      if (p.nombre.toLowerCase().includes(searchLower)) directPisoMatches.add(p.id);
+    });
+
+    const directEdificioMatches = new Set<string>();
+    edificios.forEach(e => {
+      if (e.nombre.toLowerCase().includes(searchLower)) directEdificioMatches.add(e.id);
+    });
+
+    const directCampusMatches = new Set<string>();
+    campusList.forEach(c => {
+      if (c.nombre.toLowerCase().includes(searchLower)) directCampusMatches.add(c.id);
+    });
+
+    const directSedeMatches = new Set<string>();
+    sedes.forEach(s => {
+      if (s.nombre.toLowerCase().includes(searchLower)) directSedeMatches.add(s.id);
+    });
+
+    // Subtree (bottom-up): If a child matches, its ancestors match
+    const mPisos = new Set<string>();
+    const mEdificios = new Set<string>();
+    const mCampus = new Set<string>();
+    const mSedes = new Set<string>();
+    const mRacks = new Set<string>();
+
+    // 1. Direct rack matches
+    directRackMatches.forEach(id => mRacks.add(id));
+
+    // Pisos containing matching racks OR direct match
+    pisos.forEach(p => {
+      const hasMatchingRack = racks.some(r => r.piso_id === p.id && mRacks.has(r.id));
+      if (directPisoMatches.has(p.id) || hasMatchingRack) {
+        mPisos.add(p.id);
+      }
+    });
+
+    // Edificios containing matching pisos OR direct match
+    edificios.forEach(e => {
+      const hasMatchingPiso = pisos.some(p => p.edificio_id === e.id && mPisos.has(p.id));
+      if (directEdificioMatches.has(e.id) || hasMatchingPiso) {
+        mEdificios.add(e.id);
+      }
+    });
+
+    // Campus containing matching edificios OR direct match
+    campusList.forEach(c => {
+      const hasMatchingEdif = edificios.some(e => e.campus_id === c.id && mEdificios.has(e.id));
+      if (directCampusMatches.has(c.id) || hasMatchingEdif) {
+        mCampus.add(c.id);
+      }
+    });
+
+    // Sedes containing matching campus OR direct match
+    sedes.forEach(s => {
+      const hasMatchingCamp = campusList.some(c => c.sede_id === s.id && mCampus.has(c.id));
+      if (directSedeMatches.has(s.id) || hasMatchingCamp) {
+        mSedes.add(s.id);
+      }
+    });
+
+    // 2. Top-down propagation: If an ancestor matches, its descendants are also included
+    sedes.forEach(s => {
+      if (directSedeMatches.has(s.id)) {
+        campusList.filter(c => c.sede_id === s.id).forEach(c => {
+          mCampus.add(c.id);
+          edificios.filter(e => e.campus_id === c.id).forEach(e => {
+            mEdificios.add(e.id);
+            pisos.filter(p => p.edificio_id === e.id).forEach(p => {
+              mPisos.add(p.id);
+              racks.filter(r => r.piso_id === p.id).forEach(r => mRacks.add(r.id));
+            });
+          });
+        });
+      }
+    });
+
+    campusList.forEach(c => {
+      if (directCampusMatches.has(c.id)) {
+        edificios.filter(e => e.campus_id === c.id).forEach(e => {
+          mEdificios.add(e.id);
+          pisos.filter(p => p.edificio_id === e.id).forEach(p => {
+            mPisos.add(p.id);
+            racks.filter(r => r.piso_id === p.id).forEach(r => mRacks.add(r.id));
+          });
+        });
+      }
+    });
+
+    edificios.forEach(e => {
+      if (directEdificioMatches.has(e.id)) {
+        pisos.filter(p => p.edificio_id === e.id).forEach(p => {
+          mPisos.add(p.id);
+          racks.filter(r => r.piso_id === p.id).forEach(r => mRacks.add(r.id));
+        });
+      }
+    });
+
+    pisos.forEach(p => {
+      if (directPisoMatches.has(p.id)) {
+        racks.filter(r => r.piso_id === p.id).forEach(r => mRacks.add(r.id));
+      }
+    });
+
+    // Nodes that should be expanded so the user sees all matches
+    const toExpand: Record<string, boolean> = {};
+    mSedes.forEach(id => { toExpand[`sede-${id}`] = true; });
+    mCampus.forEach(id => { toExpand[`campus-${id}`] = true; });
+    mEdificios.forEach(id => { toExpand[`edificio-${id}`] = true; });
+    mPisos.forEach(id => { toExpand[`piso-${id}`] = true; });
+
+    return {
+      matchingPisoIds: mPisos,
+      matchingEdificioIds: mEdificios,
+      matchingCampusIds: mCampus,
+      matchingSedeIds: mSedes,
+      matchingRackIds: mRacks,
+      nodesToExpandOnSearch: toExpand,
+    };
+  }, [searchLower, racks, pisos, edificios, campusList, sedes]);
+
+  // 5. Auto-expand branches when searching
+  useEffect(() => {
+    if (!searchLower || !nodesToExpandOnSearch) return;
+
+    setExpandedNodes(prev => ({
+      ...prev,
+      ...nodesToExpandOnSearch,
+    }));
+  }, [searchLower, nodesToExpandOnSearch]);
 
   return (
     <div className="w-full max-w-[1720px] mx-auto px-3 sm:px-6 py-5">
@@ -464,7 +721,7 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
               <button 
                 onClick={() => openCreateModal('sede')}
                 title="Agregar Nueva Sede"
-                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors shadow-2xs font-mono"
+                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors shadow-2xs font-mono cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>Sede</span>
@@ -472,15 +729,15 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
               <button 
                 onClick={() => loadTreeData()}
                 title="Recargar árbol"
-                className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded transition-colors"
+                className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded transition-colors cursor-pointer"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
               </button>
             </div>
           </div>
 
-          {/* Search Bar */}
-          <div className="p-3 border-b border-slate-200 bg-white">
+          {/* Search Bar & Controls Header */}
+          <div className="p-3 border-b border-slate-200 bg-white space-y-2.5">
             <div className="relative">
               <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
               <input
@@ -488,8 +745,54 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
                 value={searchFilter}
                 onChange={(e) => setSearchFilter(e.target.value)}
                 placeholder="Filtrar por sede, edificio, rack..."
-                className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded focus:bg-white focus:outline-none focus:ring-1 focus:ring-blue-600 focus:border-blue-600"
+                className="w-full pl-8 pr-7 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:outline-none focus:ring-1 focus:ring-blue-600 focus:border-blue-600 font-sans"
               />
+              {searchFilter && (
+                <button
+                  type="button"
+                  onClick={() => setSearchFilter('')}
+                  className="absolute right-2 top-2 text-slate-400 hover:text-slate-600 p-0.5 rounded cursor-pointer"
+                  title="Limpiar búsqueda"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+
+            {/* Tree Controls: Expandir todo / Contraer todo & Solo ramas con racks */}
+            <div className="flex items-center justify-between gap-2 pt-0.5 flex-wrap">
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={handleExpandAll}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200/80 rounded transition-colors cursor-pointer border border-slate-200 shadow-2xs"
+                  title="Expandir todas las sedes, campus, edificios y pisos"
+                >
+                  <ChevronsDown className="w-3 h-3 text-slate-500" />
+                  <span>Expandir todo</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCollapseAll}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200/80 rounded transition-colors cursor-pointer border border-slate-200 shadow-2xs"
+                  title="Contraer todas las sedes, campus, edificios y pisos"
+                >
+                  <ChevronsUp className="w-3 h-3 text-slate-500" />
+                  <span>Contraer todo</span>
+                </button>
+              </div>
+
+              {/* Interruptor: Solo ramas con racks */}
+              <label className="inline-flex items-center gap-1.5 cursor-pointer select-none text-[11px] font-medium text-slate-700 hover:text-slate-900">
+                <input
+                  type="checkbox"
+                  checked={soloRamasConRacks}
+                  onChange={(e) => setSoloRamasConRacks(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="relative w-7 h-4 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-3 peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-blue-600"></div>
+                <span className="font-semibold text-slate-700 whitespace-nowrap">Solo ramas con racks</span>
+              </label>
             </div>
           </div>
 
@@ -537,24 +840,36 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
               <div className="space-y-1">
                 {sedes.map((sede) => {
                   const sedeCampus = campusList.filter(c => c.sede_id === sede.id);
-                  const isSedeExpanded = expandedNodes[`sede-${sede.id}`] ?? true;
+                  const isSedeExpanded = Boolean(expandedNodes[`sede-${sede.id}`]);
 
-                  if (searchFilter && !matchesSearch(sede.nombre) && 
-                      !sedeCampus.some(c => matchesSearch(c.nombre))) {
+                  // Filter by solo ramas con racks
+                  if (soloRamasConRacks && !sedeIdsWithRacks.has(sede.id)) {
                     return null;
                   }
 
+                  // Filter by search query
+                  if (matchingSedeIds && !matchingSedeIds.has(sede.id)) {
+                    return null;
+                  }
+
+                  // Visible campus list for this sede
+                  const visibleSedeCampus = sedeCampus.filter(c => {
+                    if (soloRamasConRacks && !campusIdsWithRacks.has(c.id)) return false;
+                    if (matchingCampusIds && !matchingCampusIds.has(c.id)) return false;
+                    return true;
+                  });
+
                   return (
                     <div key={sede.id} className="select-none">
-                      {/* LEVEL 1: Sede Node */}
+                      {/* LEVEL 1: Sede Node (Discreet style) */}
                       <div 
                         onClick={() => toggleNode(`sede-${sede.id}`)}
-                        className="group flex items-center justify-between p-1.5 rounded hover:bg-slate-100 cursor-pointer font-semibold text-slate-800 transition-colors"
+                        className="group flex items-center justify-between p-1.5 rounded hover:bg-slate-100/80 cursor-pointer font-semibold text-slate-800 transition-colors"
                       >
                         <div className="flex items-center gap-1.5 overflow-hidden flex-1 min-w-0 pr-1">
                           {isSedeExpanded ? <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
                           <Building2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                          <span className="truncate">{sede.nombre}</span>
+                          <span className="truncate text-xs font-semibold text-slate-800">{highlightMatch(sede.nombre, searchFilter)}</span>
                         </div>
 
                         <div className="flex items-center gap-1 shrink-0">
@@ -592,7 +907,7 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
                             </button>
                           </div>
                           <span className="text-[10px] text-slate-400 font-normal">
-                            {sedeCampus.length} Campus
+                            {visibleSedeCampus.length} Campus
                           </span>
                         </div>
                       </div>
@@ -600,330 +915,414 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
                       {/* LEVEL 2: Campus Nodes */}
                       {isSedeExpanded && (
                         <div className="ml-4 pl-2 border-l border-slate-200 space-y-1 mt-1">
-                          {sedeCampus.length === 0 ? (
-                            <div className="py-1.5 px-2 text-[11px] text-slate-400 flex items-center justify-between bg-slate-50 rounded border border-dashed border-slate-200">
-                              <span>Sin campus registrados</span>
-                              <button
-                                onClick={() => openCreateModal('campus', sede.id)}
-                                className="text-blue-600 hover:text-blue-800 font-semibold text-[10px] flex items-center gap-0.5"
-                              >
-                                <Plus className="w-3 h-3" />
-                                <span>Crear Campus</span>
-                              </button>
-                            </div>
-                          ) : (
-                            sedeCampus.map((campus) => {
-                            const campEdificios = edificios.filter(e => e.campus_id === campus.id);
-                            const isCampExpanded = expandedNodes[`campus-${campus.id}`] ?? true;
-
-                            return (
-                              <div key={campus.id}>
-                                <div 
-                                  onClick={() => toggleNode(`campus-${campus.id}`)}
-                                  className="group flex items-center justify-between p-1.5 rounded hover:bg-slate-100 cursor-pointer text-slate-700 transition-colors"
+                          {visibleSedeCampus.length === 0 ? (
+                            soloRamasConRacks ? null : (
+                              <div className="py-1.5 px-2 text-[11px] text-slate-400 flex items-center justify-between bg-slate-50 rounded border border-dashed border-slate-200">
+                                <span>Sin campus registrados</span>
+                                <button
+                                  onClick={() => openCreateModal('campus', sede.id)}
+                                  className="text-blue-600 hover:text-blue-800 font-semibold text-[10px] flex items-center gap-0.5"
                                 >
-                                  <div className="flex items-center gap-1.5 overflow-hidden flex-1 min-w-0 pr-1">
-                                    {isCampExpanded ? <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" /> : <ChevronRight className="w-3 h-3 text-slate-400 shrink-0" />}
-                                    <MapPin className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                                    <span className="truncate font-semibold text-slate-800" title={campus.nombre}>{campus.nombre}</span>
-                                  </div>
+                                  <Plus className="w-3 h-3" />
+                                  <span>Crear Campus</span>
+                                </button>
+                              </div>
+                            )
+                          ) : (
+                            visibleSedeCampus.map((campus) => {
+                              const campEdificios = edificios.filter(e => e.campus_id === campus.id);
+                              const isCampExpanded = Boolean(expandedNodes[`campus-${campus.id}`]);
 
-                                  <div className="flex items-center gap-1 shrink-0">
-                                    {/* Hover action group */}
-                                    <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 mr-1">
-                                      <button
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          openCreateModal('edificio', campus.id);
-                                        }}
-                                        title="Agregar Edificio a este Campus"
-                                        className="p-1 hover:text-blue-600 hover:bg-blue-50 text-slate-400 rounded transition-colors"
-                                      >
-                                        <Plus className="w-3 h-3" />
-                                      </button>
-                                      <button
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          openEditNodeModal('campus', campus);
-                                        }}
-                                        title="Editar Campus"
-                                        className="p-1 hover:text-amber-600 hover:bg-amber-50 text-slate-400 rounded transition-colors"
-                                      >
-                                        <Edit3 className="w-3 h-3" />
-                                      </button>
-                                      <button
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          openDeleteNodeModal('campus', campus.id, campus.nombre);
-                                        }}
-                                        title="Eliminar Campus"
-                                        className="p-1 hover:text-red-600 hover:bg-red-50 text-slate-400 rounded transition-colors"
-                                      >
-                                        <Trash2 className="w-3 h-3" />
-                                      </button>
+                              const visibleCampEdificios = campEdificios.filter(e => {
+                                if (soloRamasConRacks && !edificioIdsWithRacks.has(e.id)) return false;
+                                if (matchingEdificioIds && !matchingEdificioIds.has(e.id)) return false;
+                                return true;
+                              });
+
+                              return (
+                                <div key={campus.id}>
+                                  {/* Discreet Campus Node */}
+                                  <div 
+                                    onClick={() => toggleNode(`campus-${campus.id}`)}
+                                    className="group flex items-center justify-between p-1.5 rounded hover:bg-slate-100/80 cursor-pointer text-slate-600 transition-colors"
+                                  >
+                                    <div className="flex items-center gap-1.5 overflow-hidden flex-1 min-w-0 pr-1">
+                                      {isCampExpanded ? <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" /> : <ChevronRight className="w-3 h-3 text-slate-400 shrink-0" />}
+                                      <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                      <span className="truncate font-medium text-slate-700 text-xs" title={campus.nombre}>{highlightMatch(campus.nombre, searchFilter)}</span>
                                     </div>
-                                    <span className="text-[10px] text-slate-400">
-                                      {campEdificios.length} Edificios
-                                    </span>
-                                  </div>
-                                </div>
 
-                                {/* LEVEL 3: Edificios Nodes */}
-                                {isCampExpanded && (
-                                  <div className="ml-3 pl-2 border-l border-slate-200 space-y-1 mt-0.5">
-                                    {campEdificios.length === 0 ? (
-                                      <div className="py-1 px-2 text-[10px] text-slate-400 flex items-center justify-between bg-slate-50 rounded border border-dashed border-slate-200">
-                                        <span>Sin edificios registrados</span>
+                                    <div className="flex items-center gap-1 shrink-0">
+                                      {/* Hover action group */}
+                                      <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 mr-1">
                                         <button
-                                          onClick={() => openCreateModal('edificio', campus.id)}
-                                          className="text-blue-600 hover:text-blue-800 font-semibold text-[10px] flex items-center gap-0.5"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            openCreateModal('edificio', campus.id);
+                                          }}
+                                          title="Agregar Edificio a este Campus"
+                                          className="p-1 hover:text-blue-600 hover:bg-blue-50 text-slate-400 rounded transition-colors"
                                         >
                                           <Plus className="w-3 h-3" />
-                                          <span>Crear Edificio</span>
+                                        </button>
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            openEditNodeModal('campus', campus);
+                                          }}
+                                          title="Editar Campus"
+                                          className="p-1 hover:text-amber-600 hover:bg-amber-50 text-slate-400 rounded transition-colors"
+                                        >
+                                          <Edit3 className="w-3 h-3" />
+                                        </button>
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            openDeleteNodeModal('campus', campus.id, campus.nombre);
+                                          }}
+                                          title="Eliminar Campus"
+                                          className="p-1 hover:text-red-600 hover:bg-red-50 text-slate-400 rounded transition-colors"
+                                        >
+                                          <Trash2 className="w-3 h-3" />
                                         </button>
                                       </div>
-                                    ) : (
-                                      campEdificios.map((edif) => {
-                                      const edifPisos = pisos.filter(p => p.edificio_id === edif.id);
-                                      const isEdifExpanded = expandedNodes[`edificio-${edif.id}`] ?? true;
-
-                                      return (
-                                        <div key={edif.id}>
-                                          <div 
-                                            onClick={() => toggleNode(`edificio-${edif.id}`)}
-                                            className="group flex items-center justify-between p-1.5 rounded hover:bg-slate-100 cursor-pointer text-slate-700 transition-colors"
-                                          >
-                                            <div className="flex items-center gap-1.5 overflow-hidden flex-1 min-w-0 pr-1">
-                                              {isEdifExpanded ? <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" /> : <ChevronRight className="w-3 h-3 text-slate-400 shrink-0" />}
-                                              <span className="truncate font-semibold text-slate-800" title={edif.nombre}>{edif.nombre}</span>
-                                            </div>
-
-                                            <div className="flex items-center gap-1 shrink-0">
-                                              {/* Hover action group */}
-                                              <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 mr-1">
-                                                <button
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    openCreateModal('piso', edif.id);
-                                                  }}
-                                                  title="Agregar Piso a este Edificio"
-                                                  className="p-1 hover:text-blue-600 hover:bg-blue-50 text-slate-400 rounded transition-colors"
-                                                >
-                                                  <Plus className="w-3 h-3" />
-                                                </button>
-                                                <button
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    openEditNodeModal('edificio', edif);
-                                                  }}
-                                                  title="Editar Edificio"
-                                                  className="p-1 hover:text-amber-600 hover:bg-amber-50 text-slate-400 rounded transition-colors"
-                                                >
-                                                  <Edit3 className="w-3 h-3" />
-                                                </button>
-                                                <button
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    openDeleteNodeModal('edificio', edif.id, edif.nombre);
-                                                  }}
-                                                  title="Eliminar Edificio"
-                                                  className="p-1 hover:text-red-600 hover:bg-red-50 text-slate-400 rounded transition-colors"
-                                                >
-                                                  <Trash2 className="w-3 h-3" />
-                                                </button>
-                                              </div>
-                                              <span className="text-[10px] text-slate-400">
-                                                {edifPisos.length} Pisos
-                                              </span>
-                                            </div>
-                                          </div>
-
-                                          {/* LEVEL 4: Pisos Nodes */}
-                                          {isEdifExpanded && (
-                                            <div className="ml-3 pl-2 border-l border-slate-200 space-y-0.5 mt-0.5">
-                                              {edifPisos.length === 0 ? (
-                                                <div className="py-1 px-2 text-[10px] text-slate-400 flex items-center justify-between bg-slate-50 rounded border border-dashed border-slate-200">
-                                                  <span>Sin pisos registrados</span>
-                                                  <button
-                                                    onClick={() => openCreateModal('piso', edif.id)}
-                                                    className="text-blue-600 hover:text-blue-800 font-semibold text-[10px] flex items-center gap-0.5"
-                                                  >
-                                                    <Plus className="w-3 h-3" />
-                                                    <span>Crear Piso</span>
-                                                  </button>
-                                                </div>
-                                              ) : (
-                                                edifPisos.map((piso) => {
-                                                const pisoRacks = racks.filter(r => r.piso_id === piso.id);
-                                                const pisoCamaras = camaras.filter(c => c.piso_id === piso.id);
-                                                const isPisoExpanded = expandedNodes[`piso-${piso.id}`] ?? true;
-
-                                                return (
-                                                  <div key={piso.id}>
-                                                    <div 
-                                                      onClick={() => toggleNode(`piso-${piso.id}`)}
-                                                      className="group flex items-center justify-between p-1 rounded hover:bg-slate-100 cursor-pointer text-slate-600 transition-colors"
-                                                    >
-                                                      <div className="flex items-center gap-1.5 flex-1 min-w-0 pr-1">
-                                                        {isPisoExpanded ? <ChevronDown className="w-2.5 h-2.5 text-slate-400 shrink-0" /> : <ChevronRight className="w-2.5 h-2.5 text-slate-400 shrink-0" />}
-                                                        <Layers className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-                                                        <span className="font-bold text-slate-900 shrink-0 whitespace-nowrap bg-indigo-50/80 border border-indigo-200 px-1.5 py-0.5 rounded text-[11px]" title={piso.nombre}>
-                                                          {piso.nombre}
-                                                        </span>
-                                                        {piso.plano_url && (
-                                                          <span 
-                                                            title={piso.plano_url.includes('cloudinary') ? 'Plano Cloudinary vinculado' : (piso.plano_url.startsWith('http') ? 'Plano en la Nube vinculado' : 'Plano local vinculado')}
-                                                            className="inline-flex items-center gap-0.5 px-1 py-0.2 rounded text-[9px] font-mono bg-blue-50 text-blue-700 border border-blue-200 shrink-0"
-                                                          >
-                                                            <Globe className="w-2.5 h-2.5" />
-                                                            <span>Plano</span>
-                                                          </span>
-                                                        )}
-                                                      </div>
-
-                                                      <div className="flex items-center gap-1 shrink-0">
-                                                        {/* Hover action group */}
-                                                        <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 mr-1">
-                                                          <button
-                                                            onClick={(e) => {
-                                                              e.stopPropagation();
-                                                              openEditNodeModal('piso', piso);
-                                                            }}
-                                                            title="Vincular o Cambiar Plano CAD (Cloudinary o archivo)"
-                                                            className="p-1 hover:text-blue-600 hover:bg-blue-50 text-slate-400 rounded transition-colors"
-                                                          >
-                                                            <Globe className="w-3 h-3" />
-                                                          </button>
-                                                          <button
-                                                            onClick={(e) => {
-                                                              e.stopPropagation();
-                                                              openCreateModal('rack', piso.id);
-                                                            }}
-                                                            title="Agregar Rack a este Piso"
-                                                            className="p-1 hover:text-blue-600 hover:bg-blue-50 text-slate-400 rounded transition-colors"
-                                                          >
-                                                            <Plus className="w-3 h-3" />
-                                                          </button>
-                                                          <button
-                                                            onClick={(e) => {
-                                                              e.stopPropagation();
-                                                              openEditNodeModal('piso', piso);
-                                                            }}
-                                                            title="Editar Piso y Plano CAD"
-                                                            className="p-1 hover:text-amber-600 hover:bg-amber-50 text-slate-400 rounded transition-colors"
-                                                          >
-                                                            <Edit3 className="w-3 h-3" />
-                                                          </button>
-                                                          <button
-                                                            onClick={(e) => {
-                                                              e.stopPropagation();
-                                                              openDeleteNodeModal('piso', piso.id, piso.nombre);
-                                                            }}
-                                                            title="Eliminar Piso"
-                                                            className="p-1 hover:text-red-600 hover:bg-red-50 text-slate-400 rounded transition-colors"
-                                                          >
-                                                            <Trash2 className="w-3 h-3" />
-                                                          </button>
-                                                        </div>
-                                                        <span className="text-[10px] text-slate-400">
-                                                          {pisoRacks.length} Racks, {pisoCamaras.length} Cámaras
-                                                        </span>
-                                                      </div>
-                                                    </div>
-
-                                                    {/* LEVEL 5: Racks in Floor */}
-                                                    {isPisoExpanded && (
-                                                      <div className="ml-4 space-y-1 py-1">
-                                                        {pisoRacks.length === 0 && pisoCamaras.length === 0 ? (
-                                                          <div className="py-1 px-2 text-[10px] text-slate-400 flex items-center justify-between bg-slate-50 rounded border border-dashed border-slate-200">
-                                                            <span>Sin racks ni cámaras</span>
-                                                            <button
-                                                              onClick={() => openCreateModal('rack', piso.id)}
-                                                              className="text-blue-600 hover:text-blue-800 font-semibold text-[10px] flex items-center gap-0.5"
-                                                            >
-                                                              <Plus className="w-3 h-3" />
-                                                              <span>Crear Rack</span>
-                                                            </button>
-                                                          </div>
-                                                        ) : (
-                                                          pisoRacks.map((rack) => {
-                                                          const isSelected = currentRack?.id === rack.id;
-                                                          return (
-                                                            <div
-                                                              key={rack.id}
-                                                              onClick={() => handleSelectRackItem(rack)}
-                                                              className={`group flex items-center justify-between p-2 rounded cursor-pointer transition-all ${
-                                                                isSelected
-                                                                  ? 'bg-blue-600 text-white shadow-xs font-semibold'
-                                                                  : 'bg-slate-50 hover:bg-blue-50 text-slate-700 border border-slate-200/60'
-                                                              }`}
-                                                            >
-                                                              <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0 pr-1">
-                                                                <Server className={`w-3.5 h-3.5 shrink-0 ${isSelected ? 'text-white' : 'text-blue-600'}`} />
-                                                                <span className="truncate font-mono">{rack.codigo}</span>
-                                                              </div>
-
-                                                              <div className="flex items-center gap-1.5 shrink-0">
-                                                                {/* Hover actions */}
-                                                                <div className={`opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 ${isSelected ? 'text-white' : ''}`}>
-                                                                  <button
-                                                                    onClick={(e) => {
-                                                                      e.stopPropagation();
-                                                                      openEditNodeModal('rack', rack);
-                                                                    }}
-                                                                    title="Editar Rack"
-                                                                    className={`p-1 rounded transition-colors ${
-                                                                      isSelected 
-                                                                        ? 'hover:bg-blue-700 text-blue-100' 
-                                                                        : 'text-slate-400 hover:text-amber-600 hover:bg-amber-50'
-                                                                    }`}
-                                                                  >
-                                                                    <Edit3 className="w-3 h-3" />
-                                                                  </button>
-                                                                  <button
-                                                                    onClick={(e) => {
-                                                                      e.stopPropagation();
-                                                                      openDeleteNodeModal('rack', rack.id, rack.codigo);
-                                                                    }}
-                                                                    title="Eliminar Rack"
-                                                                    className={`p-1 rounded transition-colors ${
-                                                                      isSelected 
-                                                                        ? 'hover:bg-blue-700 text-blue-100' 
-                                                                        : 'text-slate-400 hover:text-red-600 hover:bg-red-50'
-                                                                    }`}
-                                                                  >
-                                                                    <Trash2 className="w-3 h-3" />
-                                                                  </button>
-                                                                </div>
-
-                                                                <span className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-mono ${
-                                                                  isSelected ? 'bg-blue-700 text-blue-100' : 'bg-slate-200 text-slate-600'
-                                                                }`}>
-                                                                  {isSelected ? 'Activo en Ficha' : `${rack.altura_u}U`}
-                                                                </span>
-                                                              </div>
-                                                            </div>
-                                                          );
-                                                        })
-                                                      )}
-                                                      </div>
-                                                    )}
-                                                  </div>
-                                                );
-                                              })
-                                            )}
-                                            </div>
-                                          )}
-                                        </div>
-                                      );
-                                    })
-                                  )}
+                                      <span className="text-[10px] text-slate-400">
+                                        {visibleCampEdificios.length} Edificios
+                                      </span>
+                                    </div>
                                   </div>
-                                )}
-                              </div>
-                            );
-                          })
-                        )}
+
+                                  {/* LEVEL 3: Edificios Nodes */}
+                                  {isCampExpanded && (
+                                    <div className="ml-3 pl-2 border-l border-slate-200 space-y-1 mt-0.5">
+                                      {visibleCampEdificios.length === 0 ? (
+                                        soloRamasConRacks ? null : (
+                                          <div className="py-1 px-2 text-[10px] text-slate-400 flex items-center justify-between bg-slate-50 rounded border border-dashed border-slate-200">
+                                            <span>Sin edificios registrados</span>
+                                            <button
+                                              onClick={() => openCreateModal('edificio', campus.id)}
+                                              className="text-blue-600 hover:text-blue-800 font-semibold text-[10px] flex items-center gap-0.5"
+                                            >
+                                              <Plus className="w-3 h-3" />
+                                              <span>Crear Edificio</span>
+                                            </button>
+                                          </div>
+                                        )
+                                      ) : (
+                                        visibleCampEdificios.map((edif) => {
+                                          const edifPisos = pisos.filter(p => p.edificio_id === edif.id);
+                                          const isEdifExpanded = Boolean(expandedNodes[`edificio-${edif.id}`]);
+
+                                          const visibleEdifPisos = edifPisos.filter(p => {
+                                            if (soloRamasConRacks && !pisoIdsWithRacks.has(p.id)) return false;
+                                            if (matchingPisoIds && !matchingPisoIds.has(p.id)) return false;
+                                            return true;
+                                          });
+
+                                          return (
+                                            <div key={edif.id}>
+                                              {/* Discreet Edificio Node */}
+                                              <div 
+                                                onClick={() => toggleNode(`edificio-${edif.id}`)}
+                                                className="group flex items-center justify-between p-1.5 rounded hover:bg-slate-100/80 cursor-pointer text-slate-600 transition-colors"
+                                              >
+                                                <div className="flex items-center gap-1.5 overflow-hidden flex-1 min-w-0 pr-1">
+                                                  {isEdifExpanded ? <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" /> : <ChevronRight className="w-3 h-3 text-slate-400 shrink-0" />}
+                                                  <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                                  <span className="truncate font-medium text-slate-700 text-xs" title={edif.nombre}>{highlightMatch(edif.nombre, searchFilter)}</span>
+                                                </div>
+
+                                                <div className="flex items-center gap-1 shrink-0">
+                                                  {/* Hover action group */}
+                                                  <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 mr-1">
+                                                    <button
+                                                      onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        openCreateModal('piso', edif.id);
+                                                      }}
+                                                      title="Agregar Piso a este Edificio"
+                                                      className="p-1 hover:text-blue-600 hover:bg-blue-50 text-slate-400 rounded transition-colors"
+                                                    >
+                                                      <Plus className="w-3 h-3" />
+                                                    </button>
+                                                    <button
+                                                      onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        openEditNodeModal('edificio', edif);
+                                                      }}
+                                                      title="Editar Edificio"
+                                                      className="p-1 hover:text-amber-600 hover:bg-amber-50 text-slate-400 rounded transition-colors"
+                                                    >
+                                                      <Edit3 className="w-3 h-3" />
+                                                    </button>
+                                                    <button
+                                                      onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        openDeleteNodeModal('edificio', edif.id, edif.nombre);
+                                                      }}
+                                                      title="Eliminar Edificio"
+                                                      className="p-1 hover:text-red-600 hover:bg-red-50 text-slate-400 rounded transition-colors"
+                                                    >
+                                                      <Trash2 className="w-3 h-3" />
+                                                    </button>
+                                                  </div>
+                                                  <span className="text-[10px] text-slate-400">
+                                                    {visibleEdifPisos.length} Pisos
+                                                  </span>
+                                                </div>
+                                              </div>
+
+                                              {/* LEVEL 4: Pisos Nodes */}
+                                              {isEdifExpanded && (
+                                                <div className="ml-3 pl-2 border-l border-slate-200 space-y-0.5 mt-0.5">
+                                                  {visibleEdifPisos.length === 0 ? (
+                                                    soloRamasConRacks ? null : (
+                                                      <div className="py-1 px-2 text-[10px] text-slate-400 flex items-center justify-between bg-slate-50 rounded border border-dashed border-slate-200">
+                                                        <span>Sin pisos registrados</span>
+                                                        <button
+                                                          onClick={() => openCreateModal('piso', edif.id)}
+                                                          className="text-blue-600 hover:text-blue-800 font-semibold text-[10px] flex items-center gap-0.5"
+                                                        >
+                                                          <Plus className="w-3 h-3" />
+                                                          <span>Crear Piso</span>
+                                                        </button>
+                                                      </div>
+                                                    )
+                                                  ) : (
+                                                    visibleEdifPisos.map((piso) => {
+                                                      const pisoRacks = racks.filter(r => r.piso_id === piso.id);
+                                                      const pisoCamaras = camaras.filter(c => c.piso_id === piso.id);
+                                                      const isPisoExpanded = Boolean(expandedNodes[`piso-${piso.id}`]);
+
+                                                      const visiblePisoRacks = pisoRacks.filter(rack => {
+                                                        if (matchingRackIds && !matchingRackIds.has(rack.id) && !piso.nombre.toLowerCase().includes(searchLower)) {
+                                                          return false;
+                                                        }
+                                                        return true;
+                                                      });
+
+                                                      return (
+                                                        <div key={piso.id}>
+                                                          {/* Discreet Piso Node */}
+                                                          <div 
+                                                            onClick={() => toggleNode(`piso-${piso.id}`)}
+                                                            className="group flex items-center justify-between p-1.5 rounded hover:bg-slate-100/80 cursor-pointer text-slate-600 transition-colors"
+                                                          >
+                                                            <div className="flex items-center gap-1.5 flex-1 min-w-0 pr-1">
+                                                              {isPisoExpanded ? <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" /> : <ChevronRight className="w-3 h-3 text-slate-400 shrink-0" />}
+                                                              <Layers className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                                              <span className="font-medium text-slate-700 text-xs shrink-0 truncate" title={piso.nombre}>
+                                                                {highlightMatch(piso.nombre, searchFilter)}
+                                                              </span>
+                                                              {piso.plano_url && (
+                                                                <span 
+                                                                  title={piso.plano_url.includes('cloudinary') ? 'Plano Cloudinary vinculado' : (piso.plano_url.startsWith('http') ? 'Plano en la Nube vinculado' : 'Plano local vinculado')}
+                                                                  className="inline-flex items-center gap-0.5 px-1 py-0.2 rounded text-[9px] font-mono text-slate-500 bg-slate-100 border border-slate-200 shrink-0"
+                                                                >
+                                                                  <Globe className="w-2.5 h-2.5 text-slate-400" />
+                                                                  <span>Plano</span>
+                                                                </span>
+                                                              )}
+                                                            </div>
+
+                                                            <div className="flex items-center gap-1 shrink-0">
+                                                              {/* Hover action group */}
+                                                              <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 mr-1">
+                                                                <button
+                                                                  onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    openEditNodeModal('piso', piso);
+                                                                  }}
+                                                                  title="Vincular o Cambiar Plano CAD (Cloudinary o archivo)"
+                                                                  className="p-1 hover:text-blue-600 hover:bg-blue-50 text-slate-400 rounded transition-colors"
+                                                                >
+                                                                  <Globe className="w-3 h-3" />
+                                                                </button>
+                                                                <button
+                                                                  onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    openCreateModal('rack', piso.id);
+                                                                  }}
+                                                                  title="Agregar Rack a este Piso"
+                                                                  className="p-1 hover:text-blue-600 hover:bg-blue-50 text-slate-400 rounded transition-colors"
+                                                                >
+                                                                  <Plus className="w-3 h-3" />
+                                                                </button>
+                                                                <button
+                                                                  onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    openEditNodeModal('piso', piso);
+                                                                  }}
+                                                                  title="Editar Piso y Plano CAD"
+                                                                  className="p-1 hover:text-amber-600 hover:bg-amber-50 text-slate-400 rounded transition-colors"
+                                                                >
+                                                                  <Edit3 className="w-3 h-3" />
+                                                                </button>
+                                                                <button
+                                                                  onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    openDeleteNodeModal('piso', piso.id, piso.nombre);
+                                                                  }}
+                                                                  title="Eliminar Piso"
+                                                                  className="p-1 hover:text-red-600 hover:bg-red-50 text-slate-400 rounded transition-colors"
+                                                                >
+                                                                  <Trash2 className="w-3 h-3" />
+                                                                </button>
+                                                              </div>
+                                                              <span className="text-[10px] text-slate-400">
+                                                                {visiblePisoRacks.length} Racks{soloRamasConRacks ? '' : (pisoCamaras.length > 0 ? `, ${pisoCamaras.length} Cámaras` : '')}
+                                                              </span>
+                                                            </div>
+                                                          </div>
+
+                                                          {/* LEVEL 5: Racks in Floor (Highlighted Rack Cards) */}
+                                                          {isPisoExpanded && (
+                                                            <div className="ml-3 pl-2 border-l border-slate-200/80 space-y-1 py-1">
+                                                              {visiblePisoRacks.length === 0 ? (
+                                                                soloRamasConRacks ? null : (
+                                                                  <div className="py-1 px-2 text-[10px] text-slate-400 flex items-center justify-between bg-slate-50 rounded border border-dashed border-slate-200">
+                                                                    <span>Sin racks ni cámaras · Crear Rack</span>
+                                                                    <button
+                                                                      onClick={() => openCreateModal('rack', piso.id)}
+                                                                      className="text-blue-600 hover:text-blue-800 font-semibold text-[10px] flex items-center gap-0.5"
+                                                                    >
+                                                                      <Plus className="w-3 h-3" />
+                                                                      <span>Crear Rack</span>
+                                                                    </button>
+                                                                  </div>
+                                                                )
+                                                              ) : (
+                                                                visiblePisoRacks.map((rack) => {
+                                                                  const isSelected = currentRack?.id === rack.id;
+                                                                  const hasCctv = cctvRackIds.has(rack.id);
+                                                                  const hasDatos = datosRackIds.has(rack.id);
+
+                                                                  return (
+                                                                    <div
+                                                                      key={rack.id}
+                                                                      onClick={() => handleSelectRackItem(rack)}
+                                                                      className={`group flex items-center justify-between p-2 rounded-r-lg rounded-l-xs cursor-pointer transition-all duration-150 border my-1 ${
+                                                                        isSelected
+                                                                          ? 'bg-blue-600 border-blue-600 text-white shadow-sm border-l-4 border-l-blue-900 ring-2 ring-blue-500/30'
+                                                                          : 'bg-slate-50/90 hover:bg-blue-50/60 text-slate-800 border-slate-200/90 border-l-4 border-l-blue-600 shadow-2xs'
+                                                                      }`}
+                                                                    >
+                                                                      <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0 pr-1">
+                                                                        {/* Ícono de rack en un recuadro de color */}
+                                                                        <div
+                                                                          className={`w-6 h-6 rounded flex items-center justify-center shrink-0 transition-colors ${
+                                                                            isSelected
+                                                                              ? 'bg-white/20 text-white border border-white/30'
+                                                                              : 'bg-blue-100 text-blue-700 border border-blue-200/70 shadow-2xs'
+                                                                          }`}
+                                                                        >
+                                                                          <Server className="w-3.5 h-3.5" />
+                                                                        </div>
+
+                                                                        {/* Código en negrita y ubicación */}
+                                                                        <div className="flex flex-col min-w-0 overflow-hidden">
+                                                                          <span className={`truncate font-bold font-mono tracking-tight text-xs ${isSelected ? 'text-white' : 'text-slate-900'}`}>
+                                                                            {highlightMatch(rack.codigo, searchFilter)}
+                                                                          </span>
+                                                                          {rack.ubicacion_especifica && (
+                                                                            <span
+                                                                              className={`truncate text-[10px] font-sans ${isSelected ? 'text-blue-100' : 'text-slate-500'}`}
+                                                                              title={rack.ubicacion_especifica}
+                                                                            >
+                                                                              {highlightMatch(rack.ubicacion_especifica, searchFilter)}
+                                                                            </span>
+                                                                          )}
+                                                                        </div>
+                                                                      </div>
+
+                                                                      <div className="flex items-center gap-1.5 shrink-0">
+                                                                        {/* Hover actions */}
+                                                                        <div className={`opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 ${isSelected ? 'text-white' : ''}`}>
+                                                                          <button
+                                                                            onClick={(e) => {
+                                                                              e.stopPropagation();
+                                                                              openEditNodeModal('rack', rack);
+                                                                            }}
+                                                                            title="Editar Rack"
+                                                                            className={`p-1 rounded transition-colors ${
+                                                                              isSelected 
+                                                                                ? 'hover:bg-blue-700 text-blue-100' 
+                                                                                : 'text-slate-400 hover:text-amber-600 hover:bg-amber-50'
+                                                                            }`}
+                                                                          >
+                                                                            <Edit3 className="w-3 h-3" />
+                                                                          </button>
+                                                                          <button
+                                                                            onClick={(e) => {
+                                                                              e.stopPropagation();
+                                                                              openDeleteNodeModal('rack', rack.id, rack.codigo);
+                                                                            }}
+                                                                            title="Eliminar Rack"
+                                                                            className={`p-1 rounded transition-colors ${
+                                                                              isSelected 
+                                                                                ? 'hover:bg-blue-700 text-blue-100' 
+                                                                                : 'text-slate-400 hover:text-red-600 hover:bg-red-50'
+                                                                            }`}
+                                                                          >
+                                                                            <Trash2 className="w-3 h-3" />
+                                                                          </button>
+                                                                        </div>
+
+                                                                        {/* Etiquetas CCTV y Datos */}
+                                                                        {hasCctv && (
+                                                                          <span
+                                                                            title="Tiene cámaras CCTV conectadas (camaras.rack_id)"
+                                                                            className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold font-mono tracking-wide ${
+                                                                              isSelected
+                                                                                ? 'bg-purple-950/40 text-purple-200 border border-purple-300/30'
+                                                                                : 'bg-purple-50 text-purple-700 border border-purple-200'
+                                                                            }`}
+                                                                          >
+                                                                            CCTV
+                                                                          </span>
+                                                                        )}
+                                                                        {hasDatos && (
+                                                                          <span
+                                                                            title="Tiene puntos de red (puntos_red.rack_id) o switch montado"
+                                                                            className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold font-mono tracking-wide ${
+                                                                              isSelected
+                                                                                ? 'bg-emerald-950/40 text-emerald-200 border border-emerald-300/30'
+                                                                                : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                                                            }`}
+                                                                          >
+                                                                            Datos
+                                                                          </span>
+                                                                        )}
+
+                                                                        {/* Altura U o Activo */}
+                                                                        <span className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-mono font-medium ${
+                                                                          isSelected ? 'bg-blue-700 text-blue-100' : 'bg-slate-200/90 text-slate-600 border border-slate-300/50'
+                                                                        }`}>
+                                                                          {isSelected ? 'Activo' : `${rack.altura_u}U`}
+                                                                        </span>
+                                                                      </div>
+                                                                    </div>
+                                                                  );
+                                                                })
+                                                              )}
+                                                            </div>
+                                                          )}
+                                                        </div>
+                                                      );
+                                                    })
+                                                  )}
+                                                </div>
+                                              )}
+                                            </div>
+                                          );
+                                        })
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })
+                          )}
                         </div>
                       )}
                     </div>

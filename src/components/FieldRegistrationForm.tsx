@@ -15,6 +15,9 @@ import {
   User, 
   FileText,
   AlertCircle,
+  AlertTriangle,
+  Zap,
+  Info,
   Upload,
   CheckCircle,
   Image as ImageIcon,
@@ -26,6 +29,8 @@ import { Sede, Campus, Edificio, Piso, Rack, Equipo, Proveedor, Marca, Modelo, C
 import { MarcaSelect, ModeloSelect, ProveedorSelect } from './catalogs/CatalogSelectors';
 import { NodeFormModal } from './TreeNodeModals';
 import { NodeLevel } from '../utils/treeHierarchy';
+import { ALIMENTACION_OPTIONS } from '../utils/poeUtils';
+import { PoeEvaluationNotice } from './PoeEvaluationNotice';
 
 interface FieldRegistrationFormProps {
   onSuccess: (newCamId?: string) => void;
@@ -78,6 +83,7 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
   const [selectedRackId, setSelectedRackId] = useState<string>('');
   const [selectedPatchPanelId, setSelectedPatchPanelId] = useState<string>('');
   const [selectedSwitchId, setSelectedSwitchId] = useState<string>('');
+  const [switchPoeMap, setSwitchPoeMap] = useState<Record<number, boolean | null>>({});
   const [selectedNvrId, setSelectedNvrId] = useState<string>('');
 
   // Port and routing values
@@ -106,6 +112,7 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
   const [antivandalico, setAntivandalico] = useState<boolean>(true);
   const [resolucionMp, setResolucionMp] = useState<string>('4');
   const [alturaMontajeM, setAlturaMontajeM] = useState<string>('2.8');
+  const [alimentacion, setAlimentacion] = useState<string>('');
 
   // Fields according to type
   const [lente, setLente] = useState<string>('2.8mm');
@@ -376,10 +383,11 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
     setSelectedNvrId(nvrList[0]?.id || '');
   };
 
-  // Load switch ports from v_puertos_switch_ocupacion (ONLY RJ45, EXCLUDE SFP)
+  // Load switch ports from v_puertos_switch_ocupacion (ONLY RJ45, EXCLUDE SFP) and PoE
   useEffect(() => {
     if (!selectedSwitchId) {
       setSwitchPorts([]);
+      setSwitchPoeMap({});
       setPuertoSwitch('');
       return;
     }
@@ -387,13 +395,28 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
     const loadPorts = async () => {
       try {
         setLoadingSwitchPorts(true);
-        const { data, error } = await supabase
-          .from('v_puertos_switch_ocupacion')
-          .select('*')
-          .eq('switch_id', selectedSwitchId)
-          .order('numero_puerto');
+        const [
+          { data, error },
+          { data: poeData }
+        ] = await Promise.all([
+          supabase
+            .from('v_puertos_switch_ocupacion')
+            .select('*')
+            .eq('switch_id', selectedSwitchId)
+            .order('numero_puerto'),
+          supabase
+            .from('v_puertos_switch_poe')
+            .select('numero_puerto, poe')
+            .eq('switch_id', selectedSwitchId)
+        ]);
 
         if (error) throw error;
+
+        const pMap: Record<number, boolean | null> = {};
+        (poeData || []).forEach((r: any) => {
+          pMap[r.numero_puerto] = r.poe;
+        });
+        setSwitchPoeMap(pMap);
 
         // Exclude SFP ports - cameras only connect to RJ45 access ports
         const rj45Only = (data || []).filter(p => p.tipo_puerto !== 'sfp');
@@ -614,6 +637,7 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
         proveedor_compra_id: proveedorCompraId || null,
         fecha_instalacion: fechaInstalacion || null,
         proveedor_instalacion_id: proveedorInstalacionId || null,
+        alimentacion: alimentacion || null,
       };
 
       const { data: newCam, error: camErr } = await supabase
@@ -646,6 +670,7 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
         setCodigo(`CAM-ENG-P2-${nextNum}`);
         setPuertoPatch(prev => Math.min((Number(prev) || 1) + 1, 24));
         setCanalNvr(prev => Math.min((Number(prev) || 1) + 1, 32));
+        setAlimentacion('');
         setDireccionIp(prev => {
           const parts = prev.split('.');
           if (parts.length === 4) {
@@ -1081,7 +1106,8 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
                       const isOccupied = Boolean(p.ocupado_por_codigo);
                       const portValue = String(p.numero_puerto);
                       const vNum = p.vlan_numero ?? p.vlan;
-                      let label = `Puerto ${p.numero_puerto} (Fa0/${p.numero_puerto})`;
+                      const isPoe = switchPoeMap[p.numero_puerto] === true;
+                      let label = `${isPoe ? '⚡ ' : ''}Puerto ${p.numero_puerto} (Fa0/${p.numero_puerto})`;
                       if (vNum) label += ` [VLAN ${vNum}]`;
                       if (isOccupied) label += ` · ✗ Ocupado (${p.ocupado_por_codigo})`;
                       else label += ` · ✓ Libre`;
@@ -1107,6 +1133,26 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
                     className="w-full px-3 py-1.5 border border-slate-300 rounded focus:ring-1 focus:ring-blue-600 text-xs font-mono"
                   />
                 )}
+
+                {/* Evaluación PoE según Requirement 1 y 3 */}
+                {selectedSwitchId && puertoSwitch && (() => {
+                  const pNumMatch = String(puertoSwitch).match(/\d+$/);
+                  const pNum = pNumMatch ? parseInt(pNumMatch[0], 10) : null;
+                  const matchedPort = switchPorts.find(p => p.numero_puerto === pNum);
+                  const selectedModel = modelos.find(m => m.id === modeloId);
+
+                  return (
+                    <PoeEvaluationNotice
+                      puertoSwitchId={matchedPort?.puerto_switch_id || null}
+                      switchId={selectedSwitchId}
+                      numeroPuerto={pNum}
+                      poeRequerido={selectedModel?.poe_requerido || null}
+                      alimentacion={alimentacion}
+                      switchPoeEstandar={switches.find(s => s.id === selectedSwitchId)?.poe_estandar || null}
+                      className="mt-2"
+                    />
+                  );
+                })()}
               </div>
             </div>
 
@@ -1290,7 +1336,7 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
           </div>
 
           {/* Características Ambientales y Físicas (Siempre Visibles) */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-slate-100">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 pt-2 border-t border-slate-100">
             <div>
               <label className="block text-[11px] text-slate-600 mb-1">Ambiente</label>
               <select
@@ -1338,6 +1384,19 @@ export const FieldRegistrationForm: React.FC<FieldRegistrationFormProps> = ({
                 placeholder="2.8"
                 className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs focus:ring-1 focus:ring-blue-600"
               />
+            </div>
+            <div>
+              <label className="block text-[11px] text-slate-600 mb-1">Alimentación</label>
+              <select
+                value={alimentacion}
+                onChange={(e) => setAlimentacion(e.target.value)}
+                className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white text-xs focus:ring-1 focus:ring-blue-600"
+              >
+                <option value="">Sin informar</option>
+                {ALIMENTACION_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
             </div>
           </div>
 

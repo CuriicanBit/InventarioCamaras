@@ -38,8 +38,9 @@ import {
   Wrench
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Rack, Equipo, Proveedor, Marca, Modelo, TipoEquipo, Camara, PuntoRed, formatRolRed, normalizeRolRedForDb } from '../types/database';
+import { Rack, Equipo, Proveedor, Marca, Modelo, TipoEquipo, Camara, PuntoRed, formatRolRed, normalizeRolRedForDb, formatSwitchPorts } from '../types/database';
 import { calculateEquipmentOccupancy, EquipmentOccupancyInfo } from '../utils/occupancyAlerts';
+import { parsePoePorts, getPoeSelectorMode, POE_ESTANDAR_OPTIONS, getPoeEstandarLabel } from '../utils/poeUtils';
 import { MarcaSelect, ModeloSelect, ProveedorSelect } from './catalogs/CatalogSelectors';
 import { DecommissionModal } from './DecommissionModal';
 import { DeleteConfirmModal } from './DeleteConfirmModal';
@@ -140,6 +141,10 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     ip_gestion: string;
     vlan: string;
     puertos_totales: string;
+    puertos_sfp_totales: string;
+    poe_puertos: string;
+    poe_estandar: string;
+    poe_presupuesto_w: string;
     canales_totales: string;
     capacidad_va: string;
     fecha_compra: string;
@@ -162,6 +167,10 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     ip_gestion: '',
     vlan: '',
     puertos_totales: '',
+    puertos_sfp_totales: '',
+    poe_puertos: '',
+    poe_estandar: '',
+    poe_presupuesto_w: '',
     canales_totales: '',
     capacidad_va: '',
     fecha_compra: '',
@@ -173,6 +182,8 @@ export const RackElevation: React.FC<RackElevationProps> = ({
   });
   const [saving, setSaving] = useState(false);
   const [savingRolRed, setSavingRolRed] = useState(false);
+  const [enlacesSwitch, setEnlacesSwitch] = useState<any[]>([]);
+  const [portsInUseError, setPortsInUseError] = useState<string | null>(null);
 
   const totalU = rack.altura_u || 42;
 
@@ -238,7 +249,8 @@ export const RackElevation: React.FC<RackElevationProps> = ({
         { data: modelosData },
         { data: camData },
         { data: puntosData },
-        { data: spData }
+        { data: spData },
+        { data: enlacesData }
       ] = await Promise.all([
         supabase
           .from('equipos')
@@ -258,7 +270,10 @@ export const RackElevation: React.FC<RackElevationProps> = ({
           .or('estado_ciclo_vida.is.null,estado_ciclo_vida.eq.instalado'),
         supabase
           .from('v_puertos_switch_ocupacion')
-          .select('*')
+          .select('*'),
+        supabase
+          .from('enlaces_switch')
+          .select('id, switch_origen_id, switch_destino_id, puerto_origen_id, puerto_destino_id, es_principal')
       ]);
 
       const loadedEquipos = (eqData || []).filter(
@@ -271,6 +286,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
       setCamaras(camData || []);
       setPuntosRed(puntosData || []);
       setSwitchPortsOccupation(spData || []);
+      setEnlacesSwitch(enlacesData || []);
 
       try {
         const savedUplinks = localStorage.getItem('cctv_nvr_uplinks');
@@ -397,6 +413,13 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     }
   };
 
+  // Modal de confirmación para desmontar switch con enlaces troncales a Bodega
+  const [dismantleTrunkConfirm, setDismantleTrunkConfirm] = useState<{
+    equipoId: string;
+    equipoCodigo: string;
+    enlacesCount: number;
+  } | null>(null);
+
   // Desmontar equipo del rack y devolverlo a Bodega
   const handleDismantleToBodega = async (equipoId: string) => {
     try {
@@ -423,6 +446,32 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     } catch (err: any) {
       console.error('Error dismantling equipment:', err);
       showToast('Error al desmontar: ' + (err.message || ''), 'error');
+    }
+  };
+
+  // Solicitar desmontar a bodega (verifica primero si tiene enlaces troncales)
+  const requestDismantleToBodega = async (equipoId: string) => {
+    try {
+      const eq = equipos.find(item => item.id === equipoId);
+      if (eq?.tipo === 'switch') {
+        const { data: trunkLinks } = await supabase
+          .from('enlaces_switch')
+          .select('id')
+          .or(`switch_origen_id.eq.${equipoId},switch_destino_id.eq.${equipoId}`);
+        const count = trunkLinks?.length || 0;
+        if (count > 0) {
+          setDismantleTrunkConfirm({
+            equipoId,
+            equipoCodigo: eq.codigo,
+            enlacesCount: count,
+          });
+          return;
+        }
+      }
+      await handleDismantleToBodega(equipoId);
+    } catch (err) {
+      console.error('Error checking trunk links before dismantle:', err);
+      await handleDismantleToBodega(equipoId);
     }
   };
 
@@ -503,6 +552,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     const initialHeight = isNonRackeable ? 0 : 1;
     const firstFreeSlot = isNonRackeable ? 0 : (findFirstAvailableUSlot(totalU, 1, occupiedSlotsMap) || totalU);
     setFormAlturaU(initialHeight || 1);
+    setPortsInUseError(null);
 
     setFormData({
       rack_id: rack.id,
@@ -518,6 +568,10 @@ export const RackElevation: React.FC<RackElevationProps> = ({
       ip_gestion: '',
       vlan: '',
       puertos_totales: '',
+      puertos_sfp_totales: '',
+      poe_puertos: '',
+      poe_estandar: '',
+      poe_presupuesto_w: '',
       canales_totales: '',
       capacidad_va: tipo === 'ups' ? '1500' : '',
       fecha_compra: '',
@@ -534,6 +588,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
   const handleOpenEditModal = (eq: Equipo) => {
     setIsEditing(true);
     setModoAvanzadoU(false);
+    setPortsInUseError(null);
     const matchedBrand = marcas.find(m => m.id === eq.marca_id || m.nombre === eq.marca);
     const matchedModel = modelos.find(m => m.id === eq.modelo_id || m.nombre === eq.modelo);
 
@@ -558,6 +613,10 @@ export const RackElevation: React.FC<RackElevationProps> = ({
       ip_gestion: eq.ip_gestion || '',
       vlan: eq.vlan !== null && eq.vlan !== undefined ? String(eq.vlan) : '',
       puertos_totales: eq.puertos_totales !== null && eq.puertos_totales !== undefined ? String(eq.puertos_totales) : '',
+      puertos_sfp_totales: eq.puertos_sfp_totales !== null && eq.puertos_sfp_totales !== undefined ? String(eq.puertos_sfp_totales) : '',
+      poe_puertos: eq.poe_puertos || '',
+      poe_estandar: eq.poe_estandar || '',
+      poe_presupuesto_w: eq.poe_presupuesto_w !== null && eq.poe_presupuesto_w !== undefined ? String(eq.poe_presupuesto_w) : '',
       canales_totales: eq.canales_totales !== null && eq.canales_totales !== undefined ? String(eq.canales_totales) : '',
       capacidad_va: eq.capacidad_va !== null && eq.capacidad_va !== undefined ? String(eq.capacidad_va) : '',
       fecha_compra: eq.fecha_compra ? eq.fecha_compra.split('T')[0] : '',
@@ -632,7 +691,11 @@ export const RackElevation: React.FC<RackElevationProps> = ({
       modelo_id: modeloId || null,
       modelo: modeloName || null,
       posicion_u_inicio: newUInferior,
-      puertos_totales: defaults?.puertos_default ? String(defaults.puertos_default) : prev.puertos_totales,
+      puertos_totales: defaults?.puertos_default !== null && defaults?.puertos_default !== undefined ? String(defaults.puertos_default) : prev.puertos_totales,
+      puertos_sfp_totales: defaults?.puertos_sfp_default !== null && defaults?.puertos_sfp_default !== undefined ? String(defaults.puertos_sfp_default) : prev.puertos_sfp_totales,
+      poe_puertos: defaults?.poe_puertos_default !== undefined && defaults?.poe_puertos_default !== null ? String(defaults.poe_puertos_default) : prev.poe_puertos,
+      poe_estandar: defaults?.poe_estandar_default !== undefined && defaults?.poe_estandar_default !== null ? String(defaults.poe_estandar_default) : prev.poe_estandar,
+      poe_presupuesto_w: defaults?.poe_presupuesto_w_default !== undefined && defaults?.poe_presupuesto_w_default !== null ? String(defaults.poe_presupuesto_w_default) : prev.poe_presupuesto_w,
       canales_totales: defaults?.canales_default ? String(defaults.canales_default) : prev.canales_totales,
       capacidad_va: defaults?.capacidad_va_default ? String(defaults.capacidad_va_default) : prev.capacidad_va,
     }));
@@ -663,10 +726,36 @@ export const RackElevation: React.FC<RackElevationProps> = ({
 
     try {
       setSaving(true);
+      setPortsInUseError(null);
       const isSwitch = formData.tipo === 'switch';
       const isPatchPanel = formData.tipo === 'patch_panel';
       const isNvr = formData.tipo === 'nvr';
       const isUps = formData.tipo === 'ups';
+
+      if (isSwitch) {
+        const rj45Str = formData.puertos_totales.trim();
+        const sfpStr = formData.puertos_sfp_totales.trim();
+        const numRj45 = rj45Str !== '' ? Number(rj45Str) : 0;
+        const numSfp = sfpStr !== '' ? Number(sfpStr) : 0;
+        if (numRj45 < 0 || numSfp < 0) {
+          alert('La cantidad de puertos no puede ser negativa.');
+          setSaving(false);
+          return;
+        }
+        if (numRj45 === 0 && numSfp === 0) {
+          alert('Un switch no puede tener 0 puertos RJ45 y 0 puertos SFP simultáneamente. Al menos uno de ellos debe ser mayor que 0.');
+          setSaving(false);
+          return;
+        }
+
+        // Validación en pantalla para switches: ningún puerto debe superar la cantidad de puertos RJ45
+        const poeCheck = parsePoePorts(formData.poe_puertos, numRj45);
+        if (!poeCheck.valid && poeCheck.error) {
+          alert(poeCheck.error);
+          setSaving(false);
+          return;
+        }
+      }
 
       const uSup = isNonRackeable ? null : Number(formData.posicion_u_fin || totalU);
       const uInf = isNonRackeable ? null : Number(formData.posicion_u_inicio || 1);
@@ -687,8 +776,15 @@ export const RackElevation: React.FC<RackElevationProps> = ({
         proveedor_compra_id: formData.proveedor_compra_id || null,
         proveedor_instalacion_id: formData.proveedor_instalacion_id || null,
         estado_ciclo_vida: 'instalado',
-        puertos_totales: (isSwitch || isPatchPanel) && formData.puertos_totales.trim()
-          ? Number(formData.puertos_totales) : null,
+        puertos_totales: isSwitch 
+          ? (formData.puertos_totales.trim() !== '' ? Number(formData.puertos_totales) : 0)
+          : (isPatchPanel && formData.puertos_totales.trim() ? Number(formData.puertos_totales) : null),
+        puertos_sfp_totales: isSwitch && formData.puertos_sfp_totales.trim() !== ''
+          ? Number(formData.puertos_sfp_totales) : (isSwitch ? 0 : null),
+        poe_puertos: isSwitch ? (formData.poe_puertos.trim() || null) : null,
+        poe_estandar: isSwitch ? (formData.poe_estandar.trim() || null) : null,
+        poe_presupuesto_w: isSwitch && formData.poe_presupuesto_w.trim() !== ''
+          ? Number(formData.poe_presupuesto_w) : null,
         canales_totales: isNvr && formData.canales_totales.trim()
           ? Number(formData.canales_totales) : null,
         capacidad_va: isUps && formData.capacidad_va.trim()
@@ -729,7 +825,12 @@ export const RackElevation: React.FC<RackElevationProps> = ({
       setIsModalOpen(false);
     } catch (err: any) {
       console.error('Error saving equipment:', err);
-      alert('Error al guardar equipo: ' + (err.message || 'Verifique los campos'));
+      const errMsg = err?.message || err?.details || '';
+      if (errMsg && (errMsg.includes('en uso') || errMsg.includes('No se puede cambiar la cantidad de puertos') || errMsg.includes('puerto'))) {
+        setPortsInUseError(errMsg);
+      } else {
+        alert('Error al guardar equipo: ' + (errMsg || 'Verifique los campos'));
+      }
     } finally {
       setSaving(false);
     }
@@ -819,6 +920,9 @@ export const RackElevation: React.FC<RackElevationProps> = ({
   };
 
   const getCapacidadLabel = (eq: Equipo): string | null => {
+    if (eq.tipo === 'switch') {
+      return `(${formatSwitchPorts(eq.puertos_totales, eq.puertos_sfp_totales)})`;
+    }
     const parts: string[] = [];
     const p = eq.puertos_totales ?? eq.modelo_rel?.puertos_default;
     const c = eq.canales_totales ?? eq.modelo_rel?.canales_default;
@@ -984,7 +1088,19 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                 {/* Ocupación con alerta estándar 75% (<73% Verde, 74-77% Amarillo, >=78% Rojo) */}
                 {(() => {
                   const occ = equipmentOccupancyMap[eq.id];
-                  if (!occ || occ.totalCapacity <= 0) return null;
+                  if (!occ || occ.totalCapacity <= 0 || occ.noAplica) {
+                    if (eq.tipo === 'switch' && eq.puertos_totales === 0) {
+                      return (
+                        <div 
+                          className="text-[10px] font-mono px-2 py-0.5 rounded font-semibold flex items-center gap-1 border bg-slate-900/80 text-slate-300 border-slate-700"
+                          title="Switch exclusivo SFP (0 puertos RJ45 - no aplica ocupación)"
+                        >
+                          <span>No aplica</span>
+                        </div>
+                      );
+                    }
+                    return null;
+                  }
                   return (
                     <div 
                       className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold flex items-center gap-1.5 border shadow-2xs ${
@@ -1363,25 +1479,55 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                 {/* Métricas rápidas de ocupación física */}
                 {(() => {
                   const occ = equipmentOccupancyMap[selectedEquipo.id];
+                  const isZeroRj45Switch = selectedEquipo.tipo === 'switch' && selectedEquipo.puertos_totales === 0;
                   return (
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3 font-mono text-xs">
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3 font-mono text-xs">
                       <div className="bg-slate-50 p-2.5 rounded border border-slate-200">
                         <span className="text-[10px] text-slate-400 block uppercase">Capacidad</span>
                         <span className="font-bold text-slate-800 text-sm">
-                          {selectedEquipo.puertos_totales || 24} Puertos
+                          {selectedEquipo.tipo === 'switch'
+                            ? formatSwitchPorts(selectedEquipo.puertos_totales, selectedEquipo.puertos_sfp_totales)
+                            : `${selectedEquipo.puertos_totales || 24} Puertos`}
                         </span>
                       </div>
                       <div className="bg-blue-50/70 p-2.5 rounded border border-blue-200">
-                        <span className="text-[10px] text-blue-600 block uppercase">Ocupados</span>
+                        <span className="text-[10px] text-blue-600 block uppercase">Ocupados RJ45</span>
                         <span className="font-bold text-blue-900 text-sm">
-                          {occ?.occupiedCount ?? 0} ({occ?.percentage ?? 0}%)
+                          {isZeroRj45Switch ? 'No aplica' : `${occ?.occupiedCount ?? 0} (${occ?.percentage ?? 0}%)`}
                         </span>
                       </div>
                       <div className="bg-emerald-50/70 p-2.5 rounded border border-emerald-200">
-                        <span className="text-[10px] text-emerald-600 block uppercase">Libres</span>
+                        <span className="text-[10px] text-emerald-600 block uppercase">Libres RJ45</span>
                         <span className="font-bold text-emerald-900 text-sm">
-                          {occ?.availableCount ?? (selectedEquipo.puertos_totales || 24)}
+                          {isZeroRj45Switch ? 'No aplica' : (occ?.availableCount ?? (selectedEquipo.puertos_totales || 24))}
                         </span>
+                      </div>
+                      {/* Estado PoE */}
+                      <div className="bg-amber-50/70 p-2.5 rounded border border-amber-200">
+                        <span className="text-[10px] text-amber-700 block uppercase font-bold flex items-center gap-1">
+                          <Zap className="w-3 h-3 text-amber-600" />
+                          <span>Alimentación PoE</span>
+                        </span>
+                        <span className="font-bold text-amber-950 text-xs block truncate mt-0.5">
+                          {(() => {
+                            const poeR = parsePoePorts(selectedEquipo.poe_puertos, selectedEquipo.puertos_totales);
+                            if (!poeR.isDefined) return 'PoE sin definir';
+                            let occPoe = 0;
+                            poeR.portSet.forEach((pn) => {
+                              if (switchPortsOccupation.some(p => p.switch_id === selectedEquipo.id && p.numero_puerto === pn && Boolean(p.ocupado_por_codigo))) {
+                                occPoe++;
+                              }
+                            });
+                            return `PoE: ${poeR.count} puertos · ${Math.max(0, poeR.count - occPoe)} libres`;
+                          })()}
+                        </span>
+                        {(selectedEquipo.poe_estandar || selectedEquipo.poe_presupuesto_w) && (
+                          <span className="text-[10px] text-amber-800 block truncate mt-0.5 font-medium">
+                            {selectedEquipo.poe_estandar ? getPoeEstandarLabel(selectedEquipo.poe_estandar) : ''}
+                            {selectedEquipo.poe_estandar && selectedEquipo.poe_presupuesto_w ? ' · ' : ''}
+                            {selectedEquipo.poe_presupuesto_w ? `${selectedEquipo.poe_presupuesto_w} W` : ''}
+                          </span>
+                        )}
                       </div>
                       <div className="bg-indigo-50/70 p-2.5 rounded border border-indigo-200">
                         <span className="text-[10px] text-indigo-600 block uppercase">IP Gestión</span>
@@ -1410,6 +1556,9 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                           }`}
                         >
                           <span>{sw.codigo}</span>
+                          <span className={`text-[10px] font-mono ${sw.id === selectedEquipo.id ? 'text-blue-100' : 'text-slate-500'}`}>
+                            ({formatSwitchPorts(sw.puertos_totales, sw.puertos_sfp_totales)})
+                          </span>
                           {sw.rol_red && (
                             <span className={`text-[9px] font-semibold px-1.5 py-0.2 rounded ${
                               sw.id === selectedEquipo.id
@@ -1778,7 +1927,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                       <Edit className="w-4 h-4" />
                     </button>
                     <button
-                      onClick={() => handleDismantleToBodega(selectedEquipo.id)}
+                      onClick={() => requestDismantleToBodega(selectedEquipo.id)}
                       className="p-1.5 text-slate-500 hover:text-amber-700 hover:bg-amber-50 rounded"
                       title="Desmontar y devolver a Bodega"
                     >
@@ -1864,14 +2013,98 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                     </div>
                     <div>
                       <span className="text-slate-500 text-[10px] block">PUERTOS / CAPACIDAD</span>
-                      <span className="text-slate-800">
-                        {selectedEquipo.puertos_totales ? `${selectedEquipo.puertos_totales} Puertos RJ45` : ''}
+                      <span className="text-slate-800 font-semibold">
+                        {selectedEquipo.tipo === 'switch'
+                          ? formatSwitchPorts(selectedEquipo.puertos_totales, selectedEquipo.puertos_sfp_totales)
+                          : selectedEquipo.puertos_totales ? `${selectedEquipo.puertos_totales} Puertos RJ45` : ''}
                         {selectedEquipo.canales_totales ? `${selectedEquipo.canales_totales} Canales NVR` : ''}
                         {selectedEquipo.capacidad_va ? `${selectedEquipo.capacidad_va}VA Respaldo` : ''}
-                        {!selectedEquipo.puertos_totales && !selectedEquipo.canales_totales && !selectedEquipo.capacidad_va ? 'Unidad Pasiva' : ''}
+                        {!selectedEquipo.puertos_totales && !selectedEquipo.canales_totales && !selectedEquipo.capacidad_va && selectedEquipo.tipo !== 'switch' ? 'Unidad Pasiva' : ''}
                       </span>
                     </div>
                   </div>
+
+                  {/* Enlaces troncales SFP info en la pestaña Resumen */}
+                  {selectedEquipo.tipo === 'switch' && (() => {
+                    const sfpTotal = selectedEquipo.puertos_sfp_totales ?? selectedEquipo.modelo_rel?.puertos_sfp_default ?? 0;
+                    const sfpConnectedCount = enlacesSwitch.filter(
+                      e => e.switch_origen_id === selectedEquipo.id || e.switch_destino_id === selectedEquipo.id
+                    ).length;
+
+                    return (
+                      <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono flex items-center justify-between gap-2">
+                        <span className="text-slate-600 font-sans font-medium">Enlaces troncales:</span>
+                        <span className="font-bold text-slate-800 font-mono">
+                          {sfpConnectedCount} de {sfpTotal} puertos SFP conectados
+                        </span>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Alimentación PoE en la pestaña Resumen */}
+                  {selectedEquipo.tipo === 'switch' && (() => {
+                    const totalRj45 = selectedEquipo.puertos_totales ?? 0;
+                    const poeRes = parsePoePorts(selectedEquipo.poe_puertos, totalRj45);
+
+                    const totalPoe = poeRes.count;
+                    let occupiedPoeCount = 0;
+                    poeRes.portSet.forEach((portNum) => {
+                      const isOccupied = switchPortsOccupation.some(
+                        (p) => p.switch_id === selectedEquipo.id && p.numero_puerto === portNum && Boolean(p.ocupado_por_codigo)
+                      );
+                      if (isOccupied) occupiedPoeCount++;
+                    });
+                    const libresPoe = Math.max(0, totalPoe - occupiedPoeCount);
+
+                    return (
+                      <div className="space-y-2">
+                        {/* Resumen de Puertos PoE */}
+                        {poeRes.isDefined ? (
+                          <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-lg text-xs font-mono flex items-center justify-between gap-2">
+                            <span className="text-amber-950 font-sans font-medium flex items-center gap-1.5">
+                              <Zap className="w-3.5 h-3.5 text-amber-600" />
+                              <span>Alimentación PoE:</span>
+                            </span>
+                            <span className="font-bold text-amber-900 font-mono bg-amber-100/80 border border-amber-300 px-2 py-0.5 rounded text-[11px]">
+                              PoE: {totalPoe} puertos · {libresPoe} libres
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono flex items-center justify-between gap-2">
+                            <span className="text-slate-600 font-sans font-medium flex items-center gap-1.5">
+                              <Zap className="w-3.5 h-3.5 text-slate-400" />
+                              <span>Alimentación PoE:</span>
+                            </span>
+                            <span className="font-semibold text-slate-500 font-sans bg-slate-200/60 px-2 py-0.5 rounded text-[11px]">
+                              PoE sin definir
+                            </span>
+                          </div>
+                        )}
+
+                        {/* Estándar PoE */}
+                        <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono flex items-center justify-between gap-2">
+                          <span className="text-slate-600 font-sans font-medium flex items-center gap-1.5">
+                            <Zap className="w-3.5 h-3.5 text-slate-500" />
+                            <span>Estándar PoE:</span>
+                          </span>
+                          <span className="font-bold text-slate-800 font-mono">
+                            {selectedEquipo.poe_estandar ? getPoeEstandarLabel(selectedEquipo.poe_estandar) : 'Sin especificar'}
+                          </span>
+                        </div>
+
+                        {/* Presupuesto PoE */}
+                        <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono flex items-center justify-between gap-2">
+                          <span className="text-slate-600 font-sans font-medium flex items-center gap-1.5">
+                            <Zap className="w-3.5 h-3.5 text-slate-500" />
+                            <span>Presupuesto PoE:</span>
+                          </span>
+                          <span className="font-bold text-slate-800 font-mono">
+                            {selectedEquipo.poe_presupuesto_w !== null && selectedEquipo.poe_presupuesto_w !== undefined ? `${selectedEquipo.poe_presupuesto_w} W` : 'Sin especificar'}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Quick drag hint / Location info */}
                   {(!selectedEquipo.posicion_u_inicio || selectedEquipo.posicion_u_inicio === 0 || selectedEquipo.u_range === 'Piso / Shaft') ? (
@@ -1882,7 +2115,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                       </span>
                       <button
                         type="button"
-                        onClick={() => handleDismantleToBodega(selectedEquipo.id)}
+                        onClick={() => requestDismantleToBodega(selectedEquipo.id)}
                         className="px-2 py-0.5 bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 rounded text-[10px] font-semibold shrink-0"
                       >
                         A Bodega
@@ -1896,7 +2129,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                       </span>
                       <button
                         type="button"
-                        onClick={() => handleDismantleToBodega(selectedEquipo.id)}
+                        onClick={() => requestDismantleToBodega(selectedEquipo.id)}
                         className="px-2 py-0.5 bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 rounded text-[10px] font-semibold"
                       >
                         A Bodega
@@ -1906,8 +2139,18 @@ export const RackElevation: React.FC<RackElevationProps> = ({
 
                   {/* SECCIÓN ESTÁNDAR DE OCUPACIÓN Y DISPOSITIVOS CONECTADOS (NORMA 75%) */}
                   {(() => {
+                    if (selectedEquipo.tipo === 'switch' && selectedEquipo.puertos_totales === 0) {
+                      return (
+                        <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono flex items-center justify-between">
+                          <span className="text-slate-600 font-sans">Ocupación RJ45 (Norma 75%):</span>
+                          <span className="font-bold text-slate-700 bg-slate-200/80 px-2 py-0.5 rounded text-[11px]">
+                            No aplica (0 puertos RJ45)
+                          </span>
+                        </div>
+                      );
+                    }
                     const occ = equipmentOccupancyMap[selectedEquipo.id];
-                    if (!occ || occ.totalCapacity <= 0) return null;
+                    if (!occ || occ.totalCapacity <= 0 || occ.noAplica) return null;
 
                     return (
                       <div className="space-y-3 pt-1">
@@ -2200,7 +2443,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
         isDraggingFromRack={draggedItem?.source === 'rack'}
         onDropToBodega={() => {
           if (draggedItem?.id) {
-            handleDismantleToBodega(draggedItem.id);
+            requestDismantleToBodega(draggedItem.id);
             setDraggedItem(null);
             setDragOverTarget(null);
           }
@@ -2652,21 +2895,193 @@ export const RackElevation: React.FC<RackElevationProps> = ({
 
                   {formData.tipo === 'switch' && (
                     <div className="space-y-3">
-                      <div>
-                        <label className="block text-[11px] text-slate-700 font-semibold mb-1">
-                          Puertos Totales *
-                        </label>
-                        <input
-                          type="number"
-                          required
-                          min="1"
-                          max="96"
-                          value={formData.puertos_totales}
-                          onChange={(e) => setFormData({ ...formData, puertos_totales: e.target.value })}
-                          placeholder="ej. 24 o 48"
-                          className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white font-mono focus:ring-1 focus:ring-blue-600 text-xs font-bold"
-                        />
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[11px] text-slate-700 font-semibold mb-1">
+                            Puertos RJ45 *
+                          </label>
+                          <input
+                            type="number"
+                            required
+                            min="0"
+                            max="96"
+                            value={formData.puertos_totales}
+                            onChange={(e) => {
+                              setFormData({ ...formData, puertos_totales: e.target.value });
+                              setPortsInUseError(null);
+                            }}
+                            placeholder="ej. 24 (o 0)"
+                            className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white font-mono focus:ring-1 focus:ring-blue-600 text-xs font-bold"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-700 font-semibold mb-1">
+                            Puertos SFP
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            max="48"
+                            value={formData.puertos_sfp_totales}
+                            onChange={(e) => {
+                              setFormData({ ...formData, puertos_sfp_totales: e.target.value });
+                              setPortsInUseError(null);
+                            }}
+                            placeholder="ej. 4 (o 0)"
+                            className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white font-mono focus:ring-1 focus:ring-blue-600 text-xs font-bold"
+                          />
+                        </div>
                       </div>
+
+                      {/* Campo Puertos PoE */}
+                      <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
+                        <div className="flex items-center justify-between">
+                          <label className="block text-[11px] font-bold text-slate-700 flex items-center gap-1.5">
+                            <Zap className="w-3.5 h-3.5 text-amber-600" />
+                            <span>Puertos PoE</span>
+                          </label>
+                          {/* Resumen "PoE: N de M puertos" */}
+                          {(() => {
+                            const totalRj45 = parseInt(formData.puertos_totales, 10) || 0;
+                            const poeInfo = parsePoePorts(formData.poe_puertos, totalRj45);
+                            return (
+                              <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold border ${
+                                poeInfo.isDefined
+                                  ? 'bg-amber-100 text-amber-900 border-amber-300'
+                                  : 'bg-white text-slate-500 border-slate-200 italic'
+                              }`}>
+                                {poeInfo.isDefined ? '⚡ ' : ''}{poeInfo.summaryText}
+                              </span>
+                            );
+                          })()}
+                        </div>
+
+                        {/* Selector rápido [Todos | Ninguno | Rangos] */}
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <button
+                            type="button"
+                            onClick={() => setFormData({ ...formData, poe_puertos: 'todos' })}
+                            className={`px-2.5 py-1 text-[11px] font-bold rounded border transition-colors cursor-pointer ${
+                              formData.poe_puertos.trim().toLowerCase() === 'todos'
+                                ? 'bg-amber-600 text-white border-amber-600 shadow-2xs'
+                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                            }`}
+                          >
+                            Todos
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setFormData({ ...formData, poe_puertos: 'ninguno' })}
+                            className={`px-2.5 py-1 text-[11px] font-bold rounded border transition-colors cursor-pointer ${
+                              formData.poe_puertos.trim().toLowerCase() === 'ninguno'
+                                ? 'bg-slate-700 text-white border-slate-700 shadow-2xs'
+                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                            }`}
+                          >
+                            Ninguno
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const cur = formData.poe_puertos.trim().toLowerCase();
+                              if (cur === 'todos' || cur === 'ninguno' || cur === '') {
+                                setFormData({ ...formData, poe_puertos: '1-8,17-24' });
+                              }
+                            }}
+                            className={`px-2.5 py-1 text-[11px] font-bold rounded border transition-colors cursor-pointer ${
+                              getPoeSelectorMode(formData.poe_puertos) === 'rangos'
+                                ? 'bg-blue-600 text-white border-blue-600 shadow-2xs'
+                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                            }`}
+                          >
+                            Rangos
+                          </button>
+                          {formData.poe_puertos && (
+                            <button
+                              type="button"
+                              onClick={() => setFormData({ ...formData, poe_puertos: '' })}
+                              className="ml-auto text-[10px] text-slate-400 hover:text-rose-600 underline cursor-pointer"
+                              title="Dejar sin definir"
+                            >
+                              Dejar sin definir
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Campo de texto en modo Rangos */}
+                        {getPoeSelectorMode(formData.poe_puertos) === 'rangos' && (
+                          <div className="space-y-1 pt-1">
+                            <input
+                              type="text"
+                              value={formData.poe_puertos}
+                              onChange={(e) => setFormData({ ...formData, poe_puertos: e.target.value })}
+                              placeholder="1-8,17-24"
+                              className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs bg-white font-mono"
+                            />
+                            <p className="text-[10px] text-slate-500 font-sans">
+                              Especifique puertos o rangos separados por coma (ejemplo: <strong>1-8,17-24</strong> o <strong>1, 3-5</strong>).
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Validación en pantalla: ningún número supere la cantidad de puertos RJ45 */}
+                        {(() => {
+                          const totalRj45 = parseInt(formData.puertos_totales, 10) || 0;
+                          const res = parsePoePorts(formData.poe_puertos, totalRj45);
+                          if (!res.valid && res.error) {
+                            return (
+                              <div className="text-[11px] text-rose-600 font-bold flex items-center gap-1 pt-0.5">
+                                <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                                <span>{res.error}</span>
+                              </div>
+                            );
+                          }
+                          return null;
+                        })()}
+
+                        {/* Campos Estándar PoE y Presupuesto PoE (W) */}
+                        <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-200">
+                          <div>
+                            <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                              Estándar PoE
+                            </label>
+                            <select
+                              value={formData.poe_estandar}
+                              onChange={(e) => setFormData({ ...formData, poe_estandar: e.target.value })}
+                              className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs bg-white"
+                            >
+                              <option value="">Sin especificar...</option>
+                              {POE_ESTANDAR_OPTIONS.map(opt => (
+                                <option key={opt.value} value={opt.value}>{opt.label}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                              Presupuesto PoE (W)
+                            </label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              value={formData.poe_presupuesto_w}
+                              onChange={(e) => setFormData({ ...formData, poe_presupuesto_w: e.target.value })}
+                              placeholder="ej. 370"
+                              className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs bg-white font-mono"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      {portsInUseError && (
+                        <div className="p-2.5 bg-rose-50 border border-rose-300 text-rose-800 rounded text-xs flex items-start gap-2 animate-in fade-in duration-150">
+                          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                          <div className="space-y-0.5">
+                            <span className="font-bold text-[11px] block">Error al actualizar puertos:</span>
+                            <span className="font-mono text-[11px] leading-tight block">{portsInUseError}</span>
+                          </div>
+                        </div>
+                      )}
                       <div className="grid grid-cols-2 gap-3">
                         <div>
                           <label className="block text-[11px] text-slate-700 font-semibold mb-1">
@@ -2850,6 +3265,51 @@ export const RackElevation: React.FC<RackElevationProps> = ({
               rack={rack}
               onBack={() => setShowRackHistoryModal(false)}
             />
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Confirmación para Switch con Enlaces Troncales al Enviar a Bodega */}
+      {dismantleTrunkConfirm && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-in fade-in duration-150">
+          <div className="bg-white rounded-xl shadow-2xl border border-slate-200 max-w-md w-full p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 bg-amber-100 text-amber-700 rounded-lg shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div className="space-y-1.5">
+                <h3 className="text-sm font-bold text-slate-900 font-sans">
+                  Confirmar Envío a Bodega
+                </h3>
+                <p className="text-xs text-slate-700 font-sans leading-relaxed">
+                  Este switch tiene <strong className="text-amber-800">{dismantleTrunkConfirm.enlacesCount} enlace(s) troncal(es)</strong> que se eliminarán.
+                </p>
+                <div className="text-[11px] text-slate-500 font-sans bg-slate-50 p-2 rounded border border-slate-200">
+                  Switch: <span className="font-mono font-bold text-slate-800">{dismantleTrunkConfirm.equipoCodigo}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setDismantleTrunkConfirm(null)}
+                className="px-3.5 py-1.5 border border-slate-300 rounded-lg text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const targetId = dismantleTrunkConfirm.equipoId;
+                  setDismantleTrunkConfirm(null);
+                  await handleDismantleToBodega(targetId);
+                }}
+                className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer shadow-sm"
+              >
+                Continuar y Enviar a Bodega
+              </button>
+            </div>
           </div>
         </div>
       )}

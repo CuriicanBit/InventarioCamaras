@@ -53,7 +53,8 @@ import {
   Sede,
   PuntoRed,
   PuertoSwitchOcupacion,
-  Vlan
+  Vlan,
+  formatSwitchPorts
 } from '../types/database';
 
 interface ExecutiveDashboardProps {
@@ -263,15 +264,20 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
 
     // Aggregate from switches
     equipos.filter(e => e.tipo === 'switch').forEach(sw => {
+      // Exclude switches with 0 RJ45 ports (e.g. Core switches todo SFP)
+      if (sw.puertos_totales === 0) return;
+
       const rack = sw.rack_id ? racksMap.get(sw.rack_id) : undefined;
       const piso = rack?.piso_id ? pisosMap.get(rack.piso_id) : undefined;
       const edificioId = piso?.edificio_id;
 
       if (edificioId && bldMap[edificioId]) {
-        const stats = switchPortStats[sw.id] || { totalRj45: sw.puertos_totales || 24, occupiedRj45: 0 };
-        bldMap[edificioId].totalRj45 += stats.totalRj45;
-        bldMap[edificioId].occupiedRj45 += stats.occupiedRj45;
-        bldMap[edificioId].switchCount += 1;
+        const stats = switchPortStats[sw.id] || { totalRj45: sw.puertos_totales !== null && sw.puertos_totales !== undefined ? sw.puertos_totales : 24, occupiedRj45: 0 };
+        if (stats.totalRj45 > 0) {
+          bldMap[edificioId].totalRj45 += stats.totalRj45;
+          bldMap[edificioId].occupiedRj45 += stats.occupiedRj45;
+          bldMap[edificioId].switchCount += 1;
+        }
       }
     });
 
@@ -313,12 +319,13 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
     }[] = [];
 
     racks.forEach(rack => {
-      const rackSwitches = equipos.filter(e => e.tipo === 'switch' && e.rack_id === rack.id);
+      // Exclude switches with 0 RJ45 ports from RJ45 capacity risk calculations
+      const rackSwitches = equipos.filter(e => e.tipo === 'switch' && e.rack_id === rack.id && e.puertos_totales !== 0);
       let totalRj45 = 0;
       let occupiedRj45 = 0;
 
       rackSwitches.forEach(sw => {
-        const stats = switchPortStats[sw.id] || { totalRj45: sw.puertos_totales || 24, occupiedRj45: 0 };
+        const stats = switchPortStats[sw.id] || { totalRj45: sw.puertos_totales !== null && sw.puertos_totales !== undefined ? sw.puertos_totales : 24, occupiedRj45: 0 };
         totalRj45 += stats.totalRj45;
         occupiedRj45 += stats.occupiedRj45;
       });
@@ -685,7 +692,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
           e.numero_serie || 'N/A',
           e.ip_gestion || 'N/A',
           e.vlan ? `VLAN ${e.vlan}` : 'N/A',
-          e.puertos_totales || 'N/A',
+          e.tipo === 'switch' ? formatSwitchPorts(e.puertos_totales, e.puertos_sfp_totales) : (e.puertos_totales || 'N/A'),
           e.canales_totales || 'N/A',
           e.capacidad_va || 'N/A',
           e.posicion_u_inicio || 'N/A',
@@ -739,17 +746,17 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
         const sede = campus?.sede_id ? sedesMap.get(campus.sede_id) : undefined;
 
         const rackEquipos = equipos.filter(e => e.rack_id === r.id);
-        const rackSwitches = rackEquipos.filter(e => e.tipo === 'switch');
+        const rackSwitches = rackEquipos.filter(e => e.tipo === 'switch' && e.puertos_totales !== 0);
         let totRj45 = 0;
         let occRj45 = 0;
 
         rackSwitches.forEach(sw => {
-          const stats = switchPortStats[sw.id] || { totalRj45: sw.puertos_totales || 24, occupiedRj45: 0 };
+          const stats = switchPortStats[sw.id] || { totalRj45: sw.puertos_totales !== null && sw.puertos_totales !== undefined ? sw.puertos_totales : 24, occupiedRj45: 0 };
           totRj45 += stats.totalRj45;
           occRj45 += stats.occupiedRj45;
         });
 
-        const pct = totRj45 > 0 ? Math.round((occRj45 / totRj45) * 100) : 0;
+        const pct = totRj45 > 0 ? `${Math.round((occRj45 / totRj45) * 100)}%` : 'No aplica';
 
         return [
           r.codigo,

@@ -23,7 +23,7 @@ import {
   HardDrive
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Camara, Equipo, Rack, Piso, Edificio, Campus, Sede, Proveedor, PuntoRed } from '../types/database';
+import { Camara, Equipo, Rack, Piso, Edificio, Campus, Sede, Proveedor, PuntoRed, formatSwitchPorts } from '../types/database';
 import { calculateEquipmentOccupancy, getOccupancyStatus, EquipmentOccupancyInfo } from '../utils/occupancyAlerts';
 
 interface InventoryItem {
@@ -254,10 +254,15 @@ export const InventoryList: React.FC<InventoryListProps> = ({
       let connStr = '-';
       let label = 'Equipo Activo';
       if (eq.tipo === 'switch') {
-        label = `Switch PoE ${eq.puertos_totales || 24}P`;
-        connStr = occ && occ.totalCapacity > 0 
-          ? `${occ.occupiedCount}/${occ.totalCapacity} puertos (${occ.percentage}%)` 
-          : (eq.puertos_totales ? `${eq.puertos_totales} Puertos` : 'Switch');
+        const portCountStr = formatSwitchPorts(eq.puertos_totales, eq.puertos_sfp_totales);
+        label = `Switch · ${portCountStr}`;
+        if (eq.puertos_totales === 0) {
+          connStr = 'No aplica';
+        } else {
+          connStr = occ && occ.totalCapacity > 0 && !occ.noAplica
+            ? `${occ.occupiedCount}/${occ.totalCapacity} puertos (${occ.percentage}%)` 
+            : portCountStr;
+        }
       } else if (eq.tipo === 'patch_panel') {
         label = `Patch Panel ${eq.puertos_totales || 24}`;
         connStr = occ && occ.totalCapacity > 0 
@@ -707,7 +712,9 @@ export const InventoryList: React.FC<InventoryListProps> = ({
                         {item.rackCodigo}
                       </td>
                       <td className="py-2.5 px-3 text-slate-600 text-[11px] whitespace-nowrap">
-                        {item.sourceType === 'equipo' && equipmentOccupancyMap[item.id]?.totalCapacity > 0 ? (
+                        {item.tipo === 'switch' && (item.rawItem as Equipo)?.puertos_totales === 0 ? (
+                          <span className="text-slate-500 font-bold font-mono text-[11px]">No aplica</span>
+                        ) : item.sourceType === 'equipo' && equipmentOccupancyMap[item.id]?.totalCapacity > 0 && !equipmentOccupancyMap[item.id]?.noAplica ? (
                           (() => {
                             const occ = equipmentOccupancyMap[item.id];
                             return (

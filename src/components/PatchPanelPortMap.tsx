@@ -1260,7 +1260,9 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
     switchPort: number,
     codigo: string,
     tipoPunto: 'datos_funcionario' | 'datos_alumno' | 'wifi_ap',
-    ubicacion?: string
+    ubicacion?: string,
+    modeloId?: string | null,
+    alimentacion?: string | null
   ) => {
     try {
       setSavingAction(true);
@@ -1279,7 +1281,9 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
           switch_id: switchId,
           puerto_switch_id: swPortId,
           categoria_cable: 'cat6',
-          estado_ciclo_vida: 'instalado'
+          estado_ciclo_vida: 'instalado',
+          modelo_id: modeloId || null,
+          alimentacion: alimentacion || null,
         })
         .select('*')
         .single();
@@ -1311,6 +1315,54 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
     } catch (err: any) {
       console.error('Error creating nuevo punto red:', err);
       showToast('Error al registrar nuevo punto: ' + (err.message || 'Error de base de datos'), 'error');
+    } finally {
+      setSavingAction(false);
+    }
+  };
+
+  // Quick create and connect new Camara CCTV
+  const handleCreateAndConnectNuevaCamara = async (
+    patchPanelId: string,
+    patchPort: number,
+    switchId: string,
+    switchPort: number,
+    codigo: string,
+    ubicacion?: string,
+    modeloId?: string | null,
+    alimentacion?: string | null
+  ) => {
+    try {
+      setSavingAction(true);
+      const { data, error } = await supabase
+        .from('camaras')
+        .insert({
+          codigo: codigo.trim(),
+          ubicacion_especifica: ubicacion?.trim() || null,
+          piso_id: currentRack?.piso_id || null,
+          rack_id: currentRack?.id || null,
+          patch_panel_id: patchPanelId,
+          puerto_patch: patchPort,
+          switch_id: switchId,
+          puerto_switch: `Fa0/${switchPort}`,
+          modelo_id: modeloId || null,
+          alimentacion: alimentacion || null,
+          estado_ciclo_vida: 'instalado',
+        })
+        .select('*, marca_rel:marcas(*), modelo_rel:modelos(*)')
+        .single();
+
+      if (error) throw error;
+
+      setCamaras(prev => [...prev, data]);
+      const pp = equipos.find(e => e.id === patchPanelId);
+      const sw = equipos.find(e => e.id === switchId);
+
+      showToast(`Cámara ${data.codigo} creada y conectada: [${pp?.codigo} P${patchPort} ───> ${sw?.codigo} P${switchPort}]`, 'success');
+
+      scheduleCableRecalc();
+    } catch (err: any) {
+      console.error('Error creating nueva camara:', err);
+      showToast('Error al registrar nueva cámara: ' + (err.message || 'Error de base de datos'), 'error');
     } finally {
       setSavingAction(false);
     }
@@ -3595,6 +3647,7 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
             puerto_patch={assignModal.patchPort}
             codigo_switch={sw?.codigo || 'Switch'}
             puerto_switch={assignModal.switchPort}
+            puerto_switch_id={swVlanInfo?.puerto_switch_id}
             patchPanelId={assignModal.patchPanelId}
             switchId={assignModal.switchId}
             vlan_id={swVlanInfo?.vlan_id}
@@ -3604,22 +3657,37 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
             uso_vlan={swVlanInfo?.uso}
             puntosRed={puntosRed}
             camaras={camaras}
-            onCreateNuevoPunto={async ({ codigo, tipo_punto, ubicacion }) => {
-              const mappedTipo: 'datos_funcionario' | 'datos_alumno' | 'wifi_ap' =
-                tipo_punto === 'datos_alumno'
-                  ? 'datos_alumno'
-                  : tipo_punto === 'wifi_ap'
-                  ? 'wifi_ap'
-                  : 'datos_funcionario';
-              await handleCreateAndConnectNuevoPuntoRed(
-                assignModal.patchPanelId,
-                assignModal.patchPort,
-                assignModal.switchId,
-                assignModal.switchPort,
-                codigo,
-                mappedTipo,
-                ubicacion
-              );
+            onCreateNuevoPunto={async ({ codigo, tipo_punto, ubicacion, modelo_id, alimentacion }) => {
+              if (tipo_punto === 'camara_cctv') {
+                await handleCreateAndConnectNuevaCamara(
+                  assignModal.patchPanelId,
+                  assignModal.patchPort,
+                  assignModal.switchId,
+                  assignModal.switchPort,
+                  codigo,
+                  ubicacion,
+                  modelo_id,
+                  alimentacion
+                );
+              } else {
+                const mappedTipo: 'datos_funcionario' | 'datos_alumno' | 'wifi_ap' =
+                  tipo_punto === 'datos_alumno'
+                    ? 'datos_alumno'
+                    : tipo_punto === 'wifi_ap'
+                    ? 'wifi_ap'
+                    : 'datos_funcionario';
+                await handleCreateAndConnectNuevoPuntoRed(
+                  assignModal.patchPanelId,
+                  assignModal.patchPort,
+                  assignModal.switchId,
+                  assignModal.switchPort,
+                  codigo,
+                  mappedTipo,
+                  ubicacion,
+                  modelo_id,
+                  alimentacion
+                );
+              }
             }}
             onSelectExistentePunto={async (puntoId) => {
               await handleCreateOrUpdateConnection(

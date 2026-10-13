@@ -65,6 +65,7 @@ export interface Modelo {
   nombre: string;
   tipo_equipo: string;
   puertos_default: number | null;
+  puertos_sfp_default?: number | null;
   canales_default: number | null;
   capacidad_va_default: number | null;
   tipo_camara_default?: string | null;
@@ -72,6 +73,12 @@ export interface Modelo {
   resolucion_mp_default?: number | null;
   apertura_fov_default?: number | null;
   zoom_optico_default?: string | boolean | null;
+  poe_puertos_default?: string | null;
+  poe_estandar_default?: string | null;
+  poe_presupuesto_w_default?: number | null;
+  poe_requerido?: string | null;
+  wifi_generacion?: string | null;
+  alcance_m_default?: number | null;
   created_at: string;
   marca?: Marca;
 }
@@ -82,7 +89,7 @@ export type EstadoCicloVida =
   | 'en_bodega' 
   | 'dado_de_baja';
 
-export type TipoEquipo = 'switch' | 'patch_panel' | 'nvr' | 'ups' | 'organizador' | 'mufa' | 'otro';
+export type TipoEquipo = 'switch' | 'patch_panel' | 'nvr' | 'ups' | 'organizador' | 'mufa' | 'access_point' | 'otro';
 
 export interface Equipo {
   id: string;
@@ -99,6 +106,10 @@ export interface Equipo {
   ip_gestion: string | null;
   vlan: number | null;
   puertos_totales: number | null;
+  puertos_sfp_totales?: number | null;
+  poe_puertos?: string | null;
+  poe_estandar?: string | null;
+  poe_presupuesto_w?: number | null;
   canales_totales: number | null;
   capacidad_va: number | null;
   fecha_compra: string | null;
@@ -134,6 +145,37 @@ export const normalizeRolRedForDb = (rol?: string | null): 'acceso' | 'distribuc
   if (clean === 'distribucion') return 'distribucion';
   if (clean === 'core') return 'core';
   return null;
+};
+
+/**
+ * Format switch port quantities according to system view specification:
+ * e.g. "24 RJ45 + 4 SFP", "48 SFP" o "24 RJ45"
+ */
+export const formatSwitchPorts = (
+  puertosRj45?: number | null, 
+  puertosSfp?: number | null
+): string => {
+  const rj45 = puertosRj45 !== null && puertosRj45 !== undefined ? Number(puertosRj45) : null;
+  const sfp = puertosSfp !== null && puertosSfp !== undefined ? Number(puertosSfp) : 0;
+
+  if (rj45 === null) {
+    if (sfp > 0) return `${sfp} SFP`;
+    return 'Switch';
+  }
+
+  if (rj45 > 0 && sfp > 0) {
+    return `${rj45} RJ45 + ${sfp} SFP`;
+  }
+  if (rj45 === 0 && sfp > 0) {
+    return `${sfp} SFP`;
+  }
+  if (rj45 > 0) {
+    return `${rj45} RJ45`;
+  }
+  if (sfp > 0) {
+    return `${sfp} SFP`;
+  }
+  return '0 Puertos';
 };
 
 export type TipoCamara = 'domo' | 'bullet' | 'ptz' | 'fisheye' | 'multisensor';
@@ -188,6 +230,7 @@ export interface Camara {
   fecha_instalacion: string | null;
   proveedor_instalacion_id: string | null;
   estado_ciclo_vida?: EstadoCicloVida | string;
+  alimentacion?: 'poe' | 'inyector' | 'fuente_propia' | string | null;
   created_at: string;
   piso?: Piso;
   rack?: Rack;
@@ -303,6 +346,7 @@ export interface PuntoRed {
   azimut?: number | null;
   apertura_fov?: number | null;
   alcance_metros?: number | null;
+  alimentacion?: 'poe' | 'inyector' | 'fuente_propia' | string | null;
   created_at: string;
   // Relational joins
   piso?: Piso;
@@ -315,3 +359,115 @@ export interface PuntoRed {
   proveedor_compra?: Proveedor;
   proveedor_instalacion?: Proveedor;
 }
+
+export interface EnlaceTroncalVista {
+  enlace_id: string;
+  es_principal: boolean;
+  created_at: string;
+  activo: boolean;
+  origen_id: string;
+  origen_codigo: string;
+  origen_rol: string | null;
+  origen_modelo: string | null;
+  origen_puerto: number;
+  origen_campus: string | null;
+  origen_edificio: string | null;
+  origen_piso: string | null;
+  origen_rack: string | null;
+  origen_ubicacion: string | null;
+  destino_id: string;
+  destino_codigo: string;
+  destino_rol: string | null;
+  destino_modelo: string | null;
+  destino_puerto: number;
+  destino_campus: string | null;
+  destino_edificio: string | null;
+  destino_piso: string | null;
+  destino_rack: string | null;
+  destino_ubicacion: string | null;
+  salta_jerarquia?: boolean | null;
+  invertido?: boolean;
+  superior_id: string;
+  superior_codigo: string;
+  superior_rol: string | null;
+  superior_modelo: string | null;
+  superior_puerto: number;
+  superior_campus: string | null;
+  superior_edificio: string | null;
+  superior_piso: string | null;
+  superior_rack: string | null;
+  superior_ubicacion: string | null;
+  inferior_id: string;
+  inferior_codigo: string;
+  inferior_rol: string | null;
+  inferior_modelo: string | null;
+  inferior_puerto: number;
+  inferior_campus: string | null;
+  inferior_edificio: string | null;
+  inferior_piso: string | null;
+  inferior_rack: string | null;
+  inferior_ubicacion: string | null;
+}
+
+export interface TopologiaPosicion {
+  vista: string;
+  equipo_id: string;
+  x: number;
+  y: number;
+  updated_at?: string;
+}
+
+export interface TopologiaSwitchVista {
+  id: string;
+  codigo: string;
+  marca: string | null;
+  modelo: string | null;
+  rol_red: string | null;
+  puertos_rj45: number | null;
+  puertos_sfp: number | null;
+  campus: string | null;
+  edificio: string | null;
+  piso: string | null;
+  rack: string | null;
+  ubicacion: string;
+  enlaces: number;
+  sfp_conectados: number;
+}
+
+export interface PuertoSwitchPoe {
+  puerto_switch_id: string;
+  switch_id: string;
+  numero_puerto: number;
+  tipo_puerto: 'rj45' | 'sfp' | string;
+  poe: boolean | null; // true: delivers PoE, false: no PoE, null: undefined
+}
+
+export interface ConexionSinPoe {
+  tipo_dispositivo: 'camara' | 'wifi_ap';
+  codigo: string;
+  switch_codigo: string;
+  numero_puerto: number;
+  edificio: string | null;
+  piso: string | null;
+  dispositivo_id?: string;
+  switch_id?: string;
+}
+
+export interface RevisionPoeItem {
+  tipo_dispositivo: 'camara' | 'wifi_ap';
+  dispositivo_id: string;
+  codigo: string;
+  modelo: string | null;
+  edificio: string | null;
+  piso: string | null;
+  switch_id: string;
+  switch_codigo: string;
+  puerto_switch_id: string;
+  numero_puerto: number;
+  estandar_switch: string | null;
+  estandar_requerido: string | null;
+  alimentacion: string | null;
+  estado_poe: 'ok' | 'sin_poe' | 'estandar_insuficiente' | 'estandar_sin_datos' | 'sin_definir';
+  resuelto: boolean;
+}
+

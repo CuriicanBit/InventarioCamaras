@@ -29,7 +29,7 @@ import {
   Loader2
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Equipo, PuertoSwitchOcupacion, Vlan, EnlaceSwitch, formatRolRed } from '../types/database';
+import { Equipo, PuertoSwitchOcupacion, Vlan, EnlaceSwitch, formatRolRed, formatSwitchPorts } from '../types/database';
 import { VlanSelect } from './catalogs/CatalogSelectors';
 import { ConfigurarEnlaceTroncalDialog } from './ConfigurarEnlaceTroncalDialog';
 
@@ -114,8 +114,17 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
     targetPorts: PuertoSwitchOcupacion[];
   } | null>(null);
 
-  // SFP accordion collapsed by default
-  const [isSfpExpanded, setIsSfpExpanded] = useState<boolean>(false);
+  // SFP accordion collapsed by default, UNLESS switch has 0 RJ45 ports (e.g. Core switch todo SFP)
+  const isZeroRj45Switch = switchEquipo.puertos_totales === 0;
+  const [isSfpExpanded, setIsSfpExpanded] = useState<boolean>(() => isZeroRj45Switch);
+
+  useEffect(() => {
+    if (switchEquipo.puertos_totales === 0) {
+      setIsSfpExpanded(true);
+    } else {
+      setIsSfpExpanded(false);
+    }
+  }, [switchEquipo.id, switchEquipo.puertos_totales]);
 
   // Modal para configurar nuevo enlace troncal SFP
   const [selectedSfpForTrunk, setSelectedSfpForTrunk] = useState<PuertoSwitchOcupacion | null>(null);
@@ -133,6 +142,8 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
   // Quick search / filter
   const [searchFilter, setSearchFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'libres' | 'configurados' | 'ocupados' | 'sin_vlan'>('all');
+  const [filterSoloPoe, setFilterSoloPoe] = useState<boolean>(false);
+  const [poeMap, setPoeMap] = useState<Record<number, boolean | null>>({});
 
   const showToast = (msg: string) => {
     setSuccessToast(msg);
@@ -174,82 +185,31 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
         .or(`switch_origen_id.eq.${switchEquipo.id},switch_destino_id.eq.${switchEquipo.id}`);
       setEnlaces((enlacesData as any) || []);
 
-      // Load ports from view
-      const { data, error } = await supabase
-        .from('v_puertos_switch_ocupacion')
-        .select('*')
-        .eq('switch_id', switchEquipo.id)
-        .order('numero_puerto', { ascending: true });
+      // Load ports from view and PoE from v_puertos_switch_poe
+      const [
+        { data, error },
+        { data: poeData }
+      ] = await Promise.all([
+        supabase
+          .from('v_puertos_switch_ocupacion')
+          .select('*')
+          .eq('switch_id', switchEquipo.id)
+          .order('numero_puerto', { ascending: true }),
+        supabase
+          .from('v_puertos_switch_poe')
+          .select('numero_puerto, poe')
+          .eq('switch_id', switchEquipo.id)
+      ]);
 
       if (error) throw error;
 
-      let portRows = data || [];
+      const pMap: Record<number, boolean | null> = {};
+      (poeData || []).forEach((r: any) => {
+        pMap[r.numero_puerto] = r.poe;
+      });
+      setPoeMap(pMap);
 
-      // Auto-seed if switch has no ports at all
-      if (portRows.length === 0) {
-        const totalRj45 = switchEquipo.puertos_totales || 24;
-        const seedRows = [];
-        for (let i = 1; i <= totalRj45; i++) {
-          seedRows.push({
-            switch_id: switchEquipo.id,
-            numero_puerto: i,
-            tipo_puerto: 'rj45',
-            vlan: switchEquipo.vlan || null,
-            uso: null,
-            descripcion: null,
-          });
-        }
-        // Also seed 4 SFP trunk uplink ports
-        for (let i = 1; i <= 4; i++) {
-          seedRows.push({
-            switch_id: switchEquipo.id,
-            numero_puerto: totalRj45 + i,
-            tipo_puerto: 'sfp',
-            vlan: null,
-            uso: 'Uplink',
-            descripcion: `Puerto SFP Uplink ${i} (1000Base-X)`,
-          });
-        }
-
-        const { error: seedErr } = await supabase.from('puertos_switch').insert(seedRows);
-        if (seedErr) {
-          console.warn('Could not auto-seed switch ports:', seedErr);
-        } else {
-          const { data: refetched } = await supabase
-            .from('v_puertos_switch_ocupacion')
-            .select('*')
-            .eq('switch_id', switchEquipo.id)
-            .order('numero_puerto', { ascending: true });
-          portRows = refetched || [];
-        }
-      } else {
-        // Check if switch has NO SFP ports yet; if so, add 4 SFP ports automatically
-        const hasSfp = portRows.some(p => p.tipo_puerto === 'sfp');
-        if (!hasSfp) {
-          const maxNum = Math.max(...portRows.map(p => p.numero_puerto), 24);
-          const sfpSeed = [];
-          for (let i = 1; i <= 4; i++) {
-            sfpSeed.push({
-              switch_id: switchEquipo.id,
-              numero_puerto: maxNum + i,
-              tipo_puerto: 'sfp',
-              vlan: null,
-              uso: 'Uplink',
-              descripcion: `Puerto SFP Uplink ${i} (1000Base-X)`,
-            });
-          }
-          const { error: sfpErr } = await supabase.from('puertos_switch').insert(sfpSeed);
-          if (!sfpErr) {
-            const { data: refetched } = await supabase
-              .from('v_puertos_switch_ocupacion')
-              .select('*')
-              .eq('switch_id', switchEquipo.id)
-              .order('numero_puerto', { ascending: true });
-            portRows = refetched || [];
-          }
-        }
-      }
-
+      const portRows = data || [];
       setPorts(portRows);
 
       // Adjust default range bounds based on RJ45 ports
@@ -579,9 +539,14 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
       if (statusFilter === 'ocupados' && st !== 'ocupado') return false;
       if (statusFilter === 'sin_vlan' && (p.vlan_numero || p.vlan)) return false;
 
+      // Filter Solo PoE
+      if (filterSoloPoe && poeMap[p.numero_puerto] !== true) {
+        return false;
+      }
+
       return true;
     });
-  }, [ports, searchFilter, statusFilter]);
+  }, [ports, searchFilter, statusFilter, filterSoloPoe, poeMap]);
 
   // Split into RJ45 and SFP sections
   const rj45Ports = useMemo(() => {
@@ -598,6 +563,15 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
   const rj45ConfiguredCount = useMemo(() => rj45All.filter(p => getPortPhysicalStatus(p) === 'configurado').length, [rj45All]);
   const rj45FreeCount = useMemo(() => rj45All.filter(p => getPortPhysicalStatus(p) === 'libre').length, [rj45All]);
   const rj45OccupancyPct = rj45All.length > 0 ? Math.round((rj45OccupiedCount / rj45All.length) * 100) : 0;
+
+  // Determination of sections visibility based on real port counts
+  const hasZeroRj45 = switchEquipo.puertos_totales === 0 || (ports.length > 0 && rj45All.length === 0);
+  const hasZeroSfp = (switchEquipo.puertos_sfp_totales === 0) || 
+    (switchEquipo.puertos_sfp_totales === null && sfpPorts.length === 0) || 
+    (ports.length > 0 && sfpPorts.length === 0);
+
+  const showRj45Section = !hasZeroRj45;
+  const showSfpSection = !hasZeroSfp && (sfpPorts.length > 0 || ports.length === 0);
 
   // Visual badge renderer for the three states
   const renderStatusBadge = (status: PortPhysicalStatus) => {
@@ -748,39 +722,45 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
                     key={sw.id}
                     type="button"
                     onClick={() => onSelectSwitch?.(sw)}
-                    className={`px-2 py-0.5 rounded text-[11px] font-mono font-bold transition-all border cursor-pointer ${
+                    className={`px-2 py-0.5 rounded text-[11px] font-mono font-bold transition-all border cursor-pointer flex items-center gap-1.5 ${
                       isActive
                         ? 'bg-blue-600 text-white border-blue-600 shadow-xs ring-1 ring-blue-300'
                         : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
                     }`}
                   >
-                    {sw.codigo} {uPos && <span className="opacity-75 text-[9px]">({uPos})</span>}
+                    <span>{sw.codigo}</span>
+                    <span className={`text-[10px] font-normal ${isActive ? 'text-blue-100' : 'text-slate-500'}`}>
+                      ({formatSwitchPorts(sw.puertos_totales, sw.puertos_sfp_totales)})
+                    </span>
+                    {uPos && <span className="opacity-75 text-[9px]">({uPos})</span>}
                   </button>
                 );
               })}
             </div>
           )}
 
-          {/* Indicadores claros de los tres estados: Libre, Configurado, Ocupado */}
-          <div className="flex flex-wrap items-center gap-2 mt-2 pt-2 border-t border-slate-100 text-[11px]">
-            <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-slate-100 border border-slate-200">
-              <span className="text-slate-500 font-sans text-[10px] uppercase font-bold">Total RJ45:</span>
-              <span className="font-bold text-slate-800 font-mono">{rj45All.length}</span>
+          {/* Indicadores claros de los tres estados: Libre, Configurado, Ocupado (Solo si tiene puertos RJ45) */}
+          {showRj45Section && (
+            <div className="flex flex-wrap items-center gap-2 mt-2 pt-2 border-t border-slate-100 text-[11px]">
+              <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-slate-100 border border-slate-200">
+                <span className="text-slate-500 font-sans text-[10px] uppercase font-bold">Total RJ45:</span>
+                <span className="font-bold text-slate-800 font-mono">{rj45All.length}</span>
+              </div>
+              <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-900 font-bold" title="Puertos con una cámara o un punto de red físicamente conectado">
+                <span className="w-2 h-2 rounded-full bg-blue-600 animate-pulse" />
+                <span>Ocupados Físicamente: {rj45OccupiedCount}</span>
+                <span className="font-normal text-[10px] text-blue-700 font-mono">({rj45OccupancyPct}%)</span>
+              </div>
+              <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-900 font-bold" title="Puertos configurados/reservados con VLAN o Uso pero sin cámara ni punto de red conectado todavía">
+                <span className="w-2 h-2 rounded-full bg-amber-500" />
+                <span>Configurados Sin Conectar: {rj45ConfiguredCount}</span>
+              </div>
+              <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-900 font-bold" title="Puertos totalmente libres sin VLAN ni dispositivo conectado">
+                <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                <span>Libres: {rj45FreeCount}</span>
+              </div>
             </div>
-            <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-900 font-bold" title="Puertos con una cámara o un punto de red físicamente conectado">
-              <span className="w-2 h-2 rounded-full bg-blue-600 animate-pulse" />
-              <span>Ocupados Físicamente: {rj45OccupiedCount}</span>
-              <span className="font-normal text-[10px] text-blue-700 font-mono">({rj45OccupancyPct}%)</span>
-            </div>
-            <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-900 font-bold" title="Puertos configurados/reservados con VLAN o Uso pero sin cámara ni punto de red conectado todavía">
-              <span className="w-2 h-2 rounded-full bg-amber-500" />
-              <span>Configurados Sin Conectar: {rj45ConfiguredCount}</span>
-            </div>
-            <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-900 font-bold" title="Puertos totalmente libres sin VLAN ni dispositivo conectado">
-              <span className="w-2 h-2 rounded-full bg-emerald-500" />
-              <span>Libres: {rj45FreeCount}</span>
-            </div>
-          </div>
+          )}
         </div>
 
         {/* Action Buttons */}
@@ -794,44 +774,49 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           </button>
 
-          {/* Botón: Asignar VLAN a puertos libres */}
-          <button
-            type="button"
-            onClick={() => {
-              setShowBulkVlan(!showBulkVlan);
-              if (!showBulkVlan) setShowRangeAssign(false);
-            }}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold transition-all shadow-2xs border cursor-pointer ${
-              showBulkVlan
-                ? 'bg-indigo-600 text-white border-indigo-600'
-                : 'bg-indigo-50 text-indigo-800 border-indigo-200 hover:bg-indigo-100'
-            }`}
-            title="Asignar una misma VLAN del catálogo a todos los puertos RJ45 que aún no tienen ninguna"
-          >
-            <Zap className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-            <span>Asignar VLAN a puertos libres</span>
-            <span className="text-[10px] bg-indigo-200/70 text-indigo-900 px-1.5 py-0.2 rounded-full font-bold">
-              {freeRj45PortsWithoutVlan.length}
-            </span>
-          </button>
+          {/* Botones de acción masiva RJ45 (Ocultos si el switch tiene 0 puertos RJ45) */}
+          {showRj45Section && (
+            <>
+              {/* Botón: Asignar VLAN a puertos libres */}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowBulkVlan(!showBulkVlan);
+                  if (!showBulkVlan) setShowRangeAssign(false);
+                }}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold transition-all shadow-2xs border cursor-pointer ${
+                  showBulkVlan
+                    ? 'bg-indigo-600 text-white border-indigo-600'
+                    : 'bg-indigo-50 text-indigo-800 border-indigo-200 hover:bg-indigo-100'
+                }`}
+                title="Asignar una misma VLAN del catálogo a todos los puertos RJ45 que aún no tienen ninguna"
+              >
+                <Zap className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                <span>Asignar VLAN a puertos libres</span>
+                <span className="text-[10px] bg-indigo-200/70 text-indigo-900 px-1.5 py-0.2 rounded-full font-bold">
+                  {freeRj45PortsWithoutVlan.length}
+                </span>
+              </button>
 
-          {/* Botón: Asignar Rango */}
-          <button
-            type="button"
-            onClick={() => {
-              setShowRangeAssign(!showRangeAssign);
-              if (!showRangeAssign) setShowBulkVlan(false);
-            }}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold transition-all shadow-2xs border cursor-pointer ${
-              showRangeAssign
-                ? 'bg-blue-600 text-white border-blue-600'
-                : 'bg-blue-50 text-blue-800 border-blue-200 hover:bg-blue-100'
-            }`}
-            title="Configurar VLAN y Uso en un rango continuo de puertos RJ45"
-          >
-            <Sliders className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-            <span>Asignar Rango</span>
-          </button>
+              {/* Botón: Asignar Rango */}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowRangeAssign(!showRangeAssign);
+                  if (!showRangeAssign) setShowBulkVlan(false);
+                }}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold transition-all shadow-2xs border cursor-pointer ${
+                  showRangeAssign
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-blue-50 text-blue-800 border-blue-200 hover:bg-blue-100'
+                }`}
+                title="Configurar VLAN y Uso en un rango continuo de puertos RJ45"
+              >
+                <Sliders className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                <span>Asignar Rango</span>
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -1118,8 +1103,11 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
         </div>
       )}
 
-      {/* Filter and Search Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1">
+      {/* SECCIÓN 1: PUERTOS RJ45 (Oculta si el switch tiene 0 puertos RJ45) */}
+      {showRj45Section && (
+        <div className="space-y-2">
+          {/* Filter and Search Bar */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1">
         <div className="flex items-center gap-2 flex-1">
           <div className="relative flex-1 max-w-xs">
             <Search className="w-3.5 h-3.5 absolute left-2.5 top-2 text-slate-400" />
@@ -1152,6 +1140,25 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
             <option value="libres">Solo Libres ({ports.filter(p => getPortPhysicalStatus(p) === 'libre').length})</option>
             <option value="sin_vlan">Sin VLAN ({ports.filter(p => !p.vlan_numero && !p.vlan).length})</option>
           </select>
+
+          <button
+            type="button"
+            onClick={() => setFilterSoloPoe(!filterSoloPoe)}
+            className={`px-2.5 py-1 text-[11px] font-bold rounded border transition-colors flex items-center gap-1.5 cursor-pointer ${
+              filterSoloPoe
+                ? 'bg-amber-500 text-white border-amber-600 shadow-2xs'
+                : 'bg-white text-slate-700 border-slate-300 hover:bg-amber-50 hover:text-amber-800'
+            }`}
+            title="Filtrar solo puertos que entregan PoE"
+          >
+            <Zap className={`w-3.5 h-3.5 ${filterSoloPoe ? 'text-amber-100' : 'text-amber-500'}`} />
+            <span>Solo PoE</span>
+            {filterSoloPoe && (
+              <span className="ml-0.5 px-1.5 py-0.2 bg-amber-600 text-white rounded-full text-[9px]">
+                {ports.filter(p => poeMap[p.numero_puerto] === true).length}
+              </span>
+            )}
+          </button>
         </div>
 
         <div className="text-[10px] text-slate-500 flex items-center gap-2">
@@ -1215,9 +1222,19 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
                         >
                           {/* Puerto */}
                           <td className="py-2 px-3 font-bold text-blue-900 whitespace-nowrap">
-                            <span className="px-1.5 py-0.5 bg-blue-200/80 text-blue-900 rounded font-bold">
-                              #{port.numero_puerto}
-                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <span className="px-1.5 py-0.5 bg-blue-200/80 text-blue-900 rounded font-bold">
+                                #{port.numero_puerto}
+                              </span>
+                              {poeMap[port.numero_puerto] === true && (
+                                <span 
+                                  className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 inline-flex items-center gap-0.5 shadow-2xs" 
+                                  title="Este puerto entrega alimentación PoE"
+                                >
+                                  ⚡ PoE
+                                </span>
+                              )}
+                            </div>
                           </td>
 
                           {/* Estado Físico */}
@@ -1319,9 +1336,19 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
                       >
                         {/* Puerto */}
                         <td className="py-2.5 px-3 font-bold text-slate-800 whitespace-nowrap">
-                          <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200 group-hover:bg-blue-50 group-hover:text-blue-700 group-hover:border-blue-200 transition-colors">
-                            #{port.numero_puerto}
-                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200 group-hover:bg-blue-50 group-hover:text-blue-700 group-hover:border-blue-200 transition-colors">
+                              #{port.numero_puerto}
+                            </span>
+                            {poeMap[port.numero_puerto] === true && (
+                              <span 
+                                className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 inline-flex items-center gap-0.5 shadow-2xs" 
+                                title="Este puerto entrega alimentación PoE"
+                              >
+                                ⚡ PoE
+                              </span>
+                            )}
+                          </div>
                         </td>
 
                         {/* Estado Físico */}
@@ -1403,26 +1430,31 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
           </div>
         </div>
       </div>
+    </div>
+  )}
 
       {/* ========================================== */}
       {/* SECCIÓN 2: PUERTOS SFP (ENLACES TRONCALES) */}
+      {/* (Oculta si el switch tiene 0 puertos SFP)  */}
       {/* ========================================== */}
-      <div className="space-y-1.5 pt-3 border-t border-slate-200">
-        <button
-          type="button"
-          onClick={() => setIsSfpExpanded(prev => !prev)}
-          className="w-full flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] font-bold text-amber-900 bg-amber-50/80 hover:bg-amber-100/80 border border-amber-200 px-3 py-2.5 rounded-lg transition-colors text-left cursor-pointer group"
-          title={isSfpExpanded ? "Clic para contraer enlaces SFP" : "Clic para expandir enlaces troncales SFP"}
-        >
-          <div className="flex items-center gap-2 flex-wrap">
-            <Radio className="w-4 h-4 text-amber-600 shrink-0" />
-            <span className="text-xs uppercase tracking-tight">
-              Puertos SFP (Enlaces Troncales) — {sfpPorts.length} Puertos de Fibra
-            </span>
-            <span className="text-[10px] font-normal px-2 py-0.5 rounded-full bg-amber-200/80 text-amber-900 border border-amber-300">
-              {isSfpExpanded ? 'Expandido' : 'Colapsado (clic para ver)'}
-            </span>
-          </div>
+      {showSfpSection && (
+        <div className="space-y-1.5 pt-3 border-t border-slate-200">
+          <button
+            type="button"
+            onClick={() => setIsSfpExpanded(prev => !prev)}
+            className="w-full flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] font-bold text-amber-900 bg-amber-50/80 hover:bg-amber-100/80 border border-amber-200 px-3 py-2.5 rounded-lg transition-colors text-left cursor-pointer group"
+            title={isSfpExpanded ? "Clic para contraer enlaces SFP" : "Clic para expandir enlaces troncales SFP"}
+          >
+            <div className="flex items-center gap-2 flex-wrap">
+              <Radio className="w-4 h-4 text-amber-600 shrink-0" />
+              <span className="text-xs uppercase tracking-tight">
+                Puertos SFP (Enlaces Troncales) — {sfpPorts.length} Puertos de Fibra
+                {hasZeroRj45 && ' · Switch Core / Todo SFP'}
+              </span>
+              <span className="text-[10px] font-normal px-2 py-0.5 rounded-full bg-amber-200/80 text-amber-900 border border-amber-300">
+                {isSfpExpanded ? 'Expandido' : 'Colapsado (clic para ver)'}
+              </span>
+            </div>
           <div className="flex items-center gap-2">
             <span className="text-[10px] text-amber-700/80 font-normal font-sans hidden sm:inline">
               {isSfpExpanded ? 'Ocultar enlaces de fibra' : 'Mostrar enlaces de fibra'}
@@ -1693,6 +1725,14 @@ export const SwitchPortsTable: React.FC<SwitchPortsTableProps> = ({
         </div>
         )}
       </div>
+    )}
+
+      {/* Mensaje cuando el switch tiene 0 puertos RJ45 y 0 puertos SFP */}
+      {hasZeroRj45 && hasZeroSfp && (
+        <div className="p-8 text-center bg-slate-50 border border-slate-200 rounded-lg text-slate-500 font-sans text-xs">
+          Este switch no tiene puertos configurados (0 RJ45 y 0 SFP).
+        </div>
+      )}
 
       {/* Modal para Configurar Enlace Troncal */}
       {selectedSfpForTrunk && (
