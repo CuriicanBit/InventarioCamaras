@@ -196,7 +196,7 @@ export function calculateEquipmentOccupancy(
       });
 
       puntosRed?.forEach(pr => {
-        if (pr.switch_id === equipo.id || pr.puerto_switch_id) {
+        if (pr.switch_id === equipo.id) {
           const portKey = pr.puerto_switch_id || pr.codigo;
           occupiedPortSet.add(String(portKey));
           connectedCameras.push({

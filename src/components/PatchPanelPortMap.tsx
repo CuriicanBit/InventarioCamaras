@@ -323,11 +323,46 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
 
       let spDataLoaded: any[] = [];
       if (swIds.length > 0) {
-        const { data: spData } = await supabase
-          .from('v_puertos_switch_ocupacion')
-          .select('*')
-          .in('switch_id', swIds);
-        spDataLoaded = spData || [];
+        // Carga puertos_switch con JOIN a la tabla vlans vía vlan_id
+        const [psRes, spOccupancyRes] = await Promise.all([
+          supabase
+            .from('puertos_switch')
+            .select('*, vlan_rel:vlans!vlan_id(*)')
+            .in('switch_id', swIds)
+            .order('numero_puerto', { ascending: true }),
+          supabase
+            .from('v_puertos_switch_ocupacion')
+            .select('*')
+            .in('switch_id', swIds)
+        ]);
+
+        const occMap: Record<string, any> = {};
+        (spOccupancyRes.data || []).forEach(o => {
+          occMap[`${o.switch_id}_${o.numero_puerto}`] = o;
+        });
+
+        if (psRes.data && psRes.data.length > 0) {
+          spDataLoaded = psRes.data.map(p => {
+            const occ = occMap[`${p.switch_id}_${p.numero_puerto}`];
+            const vlan = p.vlan_rel;
+            return {
+              puerto_switch_id: p.id,
+              switch_id: p.switch_id,
+              numero_puerto: p.numero_puerto,
+              tipo_puerto: p.tipo_puerto || 'rj45',
+              vlan_id: p.vlan_id || vlan?.id || null,
+              vlan_numero: vlan?.numero ?? occ?.vlan_numero ?? (typeof p.vlan === 'number' ? p.vlan : null),
+              vlan_nombre: vlan?.nombre ?? occ?.vlan_nombre ?? (vlan?.numero ? `VLAN ${vlan.numero}` : null),
+              vlan_color: vlan?.color ?? occ?.vlan_color ?? null,
+              uso: p.uso || vlan?.uso || vlan?.descripcion || occ?.uso || null,
+              descripcion: p.descripcion || occ?.descripcion || null,
+              ocupado_por_codigo: occ?.ocupado_por_codigo || null,
+              ocupado_por_tipo: occ?.ocupado_por_tipo || null,
+            };
+          });
+        } else {
+          spDataLoaded = spOccupancyRes.data || [];
+        }
         setSwitchPortsOccupation(spDataLoaded);
       } else {
         setSwitchPortsOccupation([]);
@@ -391,7 +426,7 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
     setSelectedNvrId(null);
     setHoveredPort(null);
     setClickConnectSource(null);
-  }, [currentRack?.id]);
+  }, [currentRack?.id, initialEquipmentId]);
 
   // Order equipment top-to-bottom by real physical rack position (posicion_u_inicio descending)
   const rackBayEquipos = useMemo(() => {
@@ -1775,7 +1810,7 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
 
     const hasVlan = Boolean(swVlan?.vlan_numero);
     const hasVlanColor = Boolean(swVlan?.vlan_color);
-    const isColoredByVlan = isOccupied && hasVlan && hasVlanColor;
+    const isColoredByVlan = hasVlan && hasVlanColor;
 
     // Determinar qué tipo de ocupante tiene (cámara, datos funcionario, datos alumno, wifi ap, nvr)
     const pto = entity?.punto || conn?.puntoRed;
@@ -2065,9 +2100,28 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
               )}
             </>
           ) : (
-            <span className="text-[8px] sm:text-[8.5px] font-mono font-medium text-slate-500">
-              LIBRE
-            </span>
+            <>
+              <span className="text-[8px] sm:text-[8.5px] font-mono font-bold tracking-tight truncate max-w-full text-slate-300">
+                {swVlan?.uso || 'DISPONIBLE'}
+              </span>
+              {hasVlan && swVlan?.vlan_numero ? (
+                <span 
+                  className="text-[7px] sm:text-[7.5px] font-mono font-black tracking-tight leading-none px-1 py-0.5 rounded-2xs mt-0.5 shadow-2xs"
+                  style={{
+                    backgroundColor: '#000000cc',
+                    color: swVlan.vlan_color || '#38bdf8',
+                    border: `1px solid ${swVlan.vlan_color || '#38bdf8'}88`
+                  }}
+                  title={`VLAN ${swVlan.vlan_numero}: ${swVlan.vlan_nombre || ''} (${swVlan.uso || ''})`}
+                >
+                  VLAN {swVlan.vlan_numero}
+                </span>
+              ) : (
+                <span className="text-[7px] sm:text-[7.5px] font-mono font-medium text-slate-500 mt-0.5">
+                  LIBRE
+                </span>
+              )}
+            </>
           )}
         </div>
       </button>

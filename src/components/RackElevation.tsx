@@ -329,17 +329,71 @@ export const RackElevation: React.FC<RackElevationProps> = ({
   // Mapa reactivo de ocupación física estricta y estándar de alerta 75% para cada equipo
   const equipmentOccupancyMap = useMemo(() => {
     const map: Record<string, EquipmentOccupancyInfo> = {};
-    equipos.forEach(eq => {
-      map[eq.id] = calculateEquipmentOccupancy(
-        eq, 
-        camaras, 
-        nvrUplinks, 
-        puntosRed, 
-        switchPortsOccupation
+    const rackEquipoIds = new Set(equipos.map(e => e.id));
+
+    // Incluir también selectedEquipo para que un switch recién creado siempre tenga su entrada lista
+    const allEquiposMap = new Map<string, Equipo>();
+    equipos.forEach(e => allEquiposMap.set(e.id, e));
+    if (selectedEquipo && !allEquiposMap.has(selectedEquipo.id)) {
+      allEquiposMap.set(selectedEquipo.id, selectedEquipo);
+      rackEquipoIds.add(selectedEquipo.id);
+    }
+
+    allEquiposMap.forEach(eq => {
+      // Filtrar estrictamente cámaras según el tipo de equipo
+      const filteredCamaras = camaras.filter(c => {
+        if (eq.tipo === 'switch') return c.switch_id === eq.id;
+        if (eq.tipo === 'patch_panel') return c.patch_panel_id === eq.id;
+        if (eq.tipo === 'nvr') return c.nvr_id === eq.id;
+        return false;
+      });
+
+      // Filtrar estrictamente puntos_red según el tipo de equipo
+      const filteredPuntosRed = puntosRed.filter(p => {
+        if (eq.tipo === 'switch') return p.switch_id === eq.id;
+        if (eq.tipo === 'patch_panel') return p.patch_panel_id === eq.id;
+        return false;
+      });
+
+      // Filtrar uplinks NVR: solo los del rack actual asignados a este equipo/switch
+      const filteredNvrUplinks: Record<string, any> = {};
+      if (nvrUplinks && (eq.tipo === 'switch' || eq.tipo === 'patch_panel')) {
+        Object.entries(nvrUplinks).forEach(([nvrId, conn]: [string, any]) => {
+          if (conn?.targetEquipoId === eq.id && rackEquipoIds.has(nvrId)) {
+            filteredNvrUplinks[nvrId] = conn;
+          }
+        });
+      }
+
+      // Filtrar puertos de ocupación exclusivamente para este switch
+      const filteredSwitchPortsOccupation = switchPortsOccupation.filter(
+        p => p.switch_id === eq.id
       );
+
+      const hasConnected = filteredCamaras.length > 0 || filteredPuntosRed.length > 0;
+      const hasUplinks = Object.keys(filteredNvrUplinks).length > 0;
+
+      const occ = calculateEquipmentOccupancy(
+        eq, 
+        filteredCamaras, 
+        filteredNvrUplinks, 
+        filteredPuntosRed, 
+        filteredSwitchPortsOccupation
+      );
+
+      // Si el equipo no tiene dispositivos conectados asignados, su entrada es explícitamente vacía
+      map[eq.id] = {
+        ...occ,
+        connectedCameras: hasConnected ? (occ.connectedCameras || []) : [],
+        connectedUplinks: hasUplinks ? (occ.connectedUplinks || []) : [],
+        occupiedCount: (hasConnected || hasUplinks) ? occ.occupiedCount : 0,
+        percentage: (hasConnected || hasUplinks) ? occ.percentage : 0,
+        status: (hasConnected || hasUplinks) ? occ.status : 'optimo',
+        statusLabel: (hasConnected || hasUplinks) ? occ.statusLabel : 'Disponible',
+      };
     });
     return map;
-  }, [equipos, camaras, nvrUplinks, puntosRed, switchPortsOccupation]);
+  }, [equipos, selectedEquipo, camaras, nvrUplinks, puntosRed, switchPortsOccupation]);
 
   // Montar equipo desde Bodega al Rack
   const handleMountFromBodega = async (eq: Equipo, targetUSuperior: number, uHeight: number) => {
