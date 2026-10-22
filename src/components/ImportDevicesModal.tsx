@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import {
   Upload,
   Download,
@@ -15,6 +15,7 @@ import {
   HelpCircle
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { Marca, Modelo } from '../types/database';
 
 interface ImportDevicesModalProps {
   isOpen: boolean;
@@ -78,7 +79,60 @@ export const ImportDevicesModal: React.FC<ImportDevicesModalProps> = ({
   const [isProcessing, setIsProcessing] = useState(false);
   const [simulationResult, setSimulationResult] = useState<SimulationResult | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [marcasList, setMarcasList] = useState<Marca[]>([]);
+  const [modelosList, setModelosList] = useState<Modelo[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Fetch marcas and modelos catalogs when modal opens
+  useEffect(() => {
+    if (!isOpen) return;
+
+    let isMounted = true;
+    const fetchCatalogos = async () => {
+      try {
+        const [{ data: marcasData }, { data: modelosData }] = await Promise.all([
+          supabase.from('marcas').select('id, nombre').order('nombre'),
+          supabase.from('modelos').select('id, marca_id, nombre, tipo_equipo').order('nombre')
+        ]);
+
+        if (isMounted) {
+          if (marcasData) setMarcasList(marcasData as Marca[]);
+          if (modelosData) setModelosList(modelosData as Modelo[]);
+        }
+      } catch (err) {
+        console.error('Error al cargar catálogos de marcas y modelos:', err);
+      }
+    };
+
+    fetchCatalogos();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen]);
+
+  // Match helpers (case-insensitive & trimmed)
+  const findMatchingMarca = (name?: string | null): Marca | undefined => {
+    if (!name) return undefined;
+    const clean = name.trim().toLowerCase();
+    return marcasList.find(m => m.nombre?.trim().toLowerCase() === clean);
+  };
+
+  const findMatchingModelo = (name?: string | null, marcaId?: string | null): Modelo | undefined => {
+    if (!name) return undefined;
+    const clean = name.trim().toLowerCase();
+    if (marcaId) {
+      const matchWithBrand = modelosList.find(
+        m => m.marca_id === marcaId && m.nombre?.trim().toLowerCase() === clean
+      );
+      if (matchWithBrand) return matchWithBrand;
+    }
+    return modelosList.find(m => m.nombre?.trim().toLowerCase() === clean);
+  };
+
+  // State for user-selected new brands and models to auto-create in DB
+  const [selectedNewBrands, setSelectedNewBrands] = useState<string[]>([]);
+  const [selectedNewModels, setSelectedNewModels] = useState<string[]>([]);
 
   // Reset state to initial
   const resetWorkflow = () => {
@@ -90,6 +144,8 @@ export const ImportDevicesModal: React.FC<ImportDevicesModalProps> = ({
     setSimulationResult(null);
     setIsProcessing(false);
     setFileError(null);
+    setSelectedNewBrands([]);
+    setSelectedNewModels([]);
   };
 
   const handleClose = () => {
@@ -298,7 +354,117 @@ export const ImportDevicesModal: React.FC<ImportDevicesModalProps> = ({
   const invalidRowsCount = processedRows.filter(r => !r.isValid).length;
   const validRowsCount = totalProcessed - invalidRowsCount;
 
-  // Step 3 to Step 4: Real Supabase Import
+  // Detección de marcas y modelos no registrados en el catálogo maestro
+  const detectedNewCatalog = useMemo(() => {
+    if (step < 3) return { brands: [] as { key: string; nombre: string; count: number }[], models: [] as { key: string; nombre: string; marcaNombre: string; tipoEquipo: string; count: number }[] };
+
+    const brandsMap = new Map<string, { key: string; nombre: string; count: number }>();
+    const modelsMap = new Map<string, { key: string; nombre: string; marcaNombre: string; tipoEquipo: string; count: number }>();
+
+    processedRows.forEach(row => {
+      const cleanMarca = row.marca?.trim();
+      if (cleanMarca) {
+        const brandMatch = findMatchingMarca(cleanMarca);
+        if (!brandMatch) {
+          const key = cleanMarca.toLowerCase();
+          const existing = brandsMap.get(key);
+          if (existing) {
+            existing.count += 1;
+          } else {
+            brandsMap.set(key, { key, nombre: cleanMarca, count: 1 });
+          }
+        }
+      }
+
+      const cleanModelo = row.modelo?.trim();
+      if (cleanModelo) {
+        const brandMatch = cleanMarca ? findMatchingMarca(cleanMarca) : undefined;
+        const modelMatch = findMatchingModelo(cleanModelo, brandMatch?.id);
+        if (!modelMatch) {
+          const key = cleanModelo.toLowerCase();
+          const existing = modelsMap.get(key);
+          const tipoEquipo = row.tipo?.toLowerCase().includes('camara') ? 'camara' : 'access_point';
+          if (existing) {
+            existing.count += 1;
+          } else {
+            modelsMap.set(key, {
+              key,
+              nombre: cleanModelo,
+              marcaNombre: cleanMarca || '',
+              tipoEquipo,
+              count: 1
+            });
+          }
+        }
+      }
+    });
+
+    return {
+      brands: Array.from(brandsMap.values()),
+      models: Array.from(modelsMap.values())
+    };
+  }, [processedRows, marcasList, modelosList, step]);
+
+  // Al ingresar al paso 3, seleccionar por defecto todas las marcas y modelos nuevos detectados
+  useEffect(() => {
+    if (step === 3) {
+      setSelectedNewBrands(detectedNewCatalog.brands.map(b => b.key));
+      setSelectedNewModels(detectedNewCatalog.models.map(m => m.key));
+    }
+  }, [step, detectedNewCatalog.brands.length, detectedNewCatalog.models.length]);
+
+  const handleSelectAllNew = () => {
+    setSelectedNewBrands(detectedNewCatalog.brands.map(b => b.key));
+    setSelectedNewModels(detectedNewCatalog.models.map(m => m.key));
+  };
+
+  const handleDeselectAllNew = () => {
+    setSelectedNewBrands([]);
+    setSelectedNewModels([]);
+  };
+
+  const handleToggleBrand = (key: string) => {
+    setSelectedNewBrands(prev =>
+      prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]
+    );
+  };
+
+  const handleToggleModel = (key: string) => {
+    setSelectedNewModels(prev =>
+      prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]
+    );
+  };
+
+  // Traducción y normalización de errores 100% al español
+  const translateErrorMessage = (error: any): string => {
+    if (!error) return 'Error desconocido al procesar el registro';
+    const msg = typeof error === 'string' ? error : error.message || '';
+    const code = error.code || '';
+    const lower = msg.toLowerCase();
+
+    if (code === '23505' || lower.includes('duplicate key') || lower.includes('unique constraint') || lower.includes('unique')) {
+      return 'El código ya existe';
+    }
+    if (lower.includes('could not find the') || lower.includes('schema cache')) {
+      return 'Error de esquema en base de datos: columna no reconocida';
+    }
+    if (lower.includes('foreign key') || code === '23503') {
+      return 'Referencia de catálogo inválida o no encontrada';
+    }
+    if (lower.includes('network') || lower.includes('fetch') || lower.includes('connection') || lower.includes('failed to fetch')) {
+      return 'Error de conexión a la base de datos';
+    }
+    if (lower.includes('not-null') || code === '23502') {
+      return 'Campo requerido no proporcionado';
+    }
+    if (lower.includes('invalid input syntax') || code === '22p02') {
+      return 'Formato inválido';
+    }
+
+    return msg || 'Error al procesar la inserción en la base de datos';
+  };
+
+  // Step 3 to Step 4: Real Supabase Import with Catalog Auto-Creation and Filtering
   const handleStartImport = async () => {
     setIsProcessing(true);
 
@@ -317,14 +483,177 @@ export const ImportDevicesModal: React.FC<ImportDevicesModalProps> = ({
       }
     });
 
-    // 2. Tomar únicamente registros válidos
+    // 2. Tomar únicamente registros válidos en estructura
     const validRows = processedRows.filter(r => r.isValid);
 
-    // 3. Separar en dos grupos según tipo
+    // 3. Filtrar dispositivos: Si un dispositivo tiene una marca o modelo nuevo NO seleccionado, excluirlo
+    const approvedRows: ProcessedRow[] = [];
+
+    validRows.forEach(r => {
+      const cleanMarca = r.marca?.trim();
+      if (cleanMarca) {
+        const brandMatch = findMatchingMarca(cleanMarca);
+        if (!brandMatch) {
+          const brandKey = cleanMarca.toLowerCase();
+          if (!selectedNewBrands.includes(brandKey)) {
+            errorsList.push({
+              row: r.index,
+              codigo: r.codigo,
+              motivo: `Marca/Modelo no autorizado para importar: la marca "${cleanMarca}" no fue seleccionada para crear en el catálogo`,
+              raw: r
+            });
+            return;
+          }
+        }
+      }
+
+      const cleanModelo = r.modelo?.trim();
+      if (cleanModelo) {
+        const brandMatch = cleanMarca ? findMatchingMarca(cleanMarca) : undefined;
+        const modelMatch = findMatchingModelo(cleanModelo, brandMatch?.id);
+        if (!modelMatch) {
+          const modelKey = cleanModelo.toLowerCase();
+          if (!selectedNewModels.includes(modelKey)) {
+            errorsList.push({
+              row: r.index,
+              codigo: r.codigo,
+              motivo: `Marca/Modelo no autorizado para importar: el modelo "${cleanModelo}" no fue seleccionado para crear en el catálogo`,
+              raw: r
+            });
+            return;
+          }
+        }
+      }
+
+      approvedRows.push(r);
+    });
+
+    // 4.a. Insertar nuevas marcas seleccionadas en tabla 'marcas' y obtener sus IDs
+    const createdBrandIds = new Map<string, string>(); // lowerKey -> id
+    const uniqueBrandsToInsert = new Map<string, string>(); // lowerKey -> originalName
+
+    approvedRows.forEach(r => {
+      const cleanMarca = r.marca?.trim();
+      if (cleanMarca && !findMatchingMarca(cleanMarca)) {
+        const key = cleanMarca.toLowerCase();
+        if (selectedNewBrands.includes(key) && !uniqueBrandsToInsert.has(key)) {
+          uniqueBrandsToInsert.set(key, cleanMarca);
+        }
+      }
+    });
+
+    for (const [key, brandName] of uniqueBrandsToInsert.entries()) {
+      try {
+        const { data: insertedBrand, error: bErr } = await supabase
+          .from('marcas')
+          .insert([{ nombre: brandName }])
+          .select('id, nombre')
+          .single();
+
+        if (insertedBrand) {
+          createdBrandIds.set(key, insertedBrand.id);
+        } else {
+          // Si ya existía o arrojó duplicado, buscar por nombre
+          const { data: existingB } = await supabase
+            .from('marcas')
+            .select('id, nombre')
+            .ilike('nombre', brandName)
+            .maybeSingle();
+
+          if (existingB) {
+            createdBrandIds.set(key, existingB.id);
+          } else {
+            console.error('Error al insertar marca en base de datos:', bErr);
+          }
+        }
+      } catch (err) {
+        console.error('Error de red al insertar marca:', err);
+      }
+    }
+
+    // 4.b. Insertar nuevos modelos seleccionados en tabla 'modelos' y obtener sus IDs
+    const createdModelIds = new Map<string, string>(); // lowerKey -> id
+    const uniqueModelsToInsert = new Map<string, { nombre: string; marcaNombre: string; tipoEquipo: string }>();
+
+    approvedRows.forEach(r => {
+      const cleanModelo = r.modelo?.trim();
+      const cleanMarca = r.marca?.trim();
+      const brandMatch = cleanMarca ? findMatchingMarca(cleanMarca) : undefined;
+      const modelMatch = cleanModelo ? findMatchingModelo(cleanModelo, brandMatch?.id) : undefined;
+
+      if (cleanModelo && !modelMatch) {
+        const key = cleanModelo.toLowerCase();
+        if (selectedNewModels.includes(key) && !uniqueModelsToInsert.has(key)) {
+          const tipoEquipo = r.tipo?.toLowerCase().includes('camara') ? 'camara' : 'access_point';
+          uniqueModelsToInsert.set(key, {
+            nombre: cleanModelo,
+            marcaNombre: cleanMarca || '',
+            tipoEquipo
+          });
+        }
+      }
+    });
+
+    for (const [key, modelData] of uniqueModelsToInsert.entries()) {
+      try {
+        let brandIdForModel: string | null = null;
+        if (modelData.marcaNombre) {
+          const bKey = modelData.marcaNombre.toLowerCase();
+          brandIdForModel = createdBrandIds.get(bKey) || findMatchingMarca(modelData.marcaNombre)?.id || null;
+        }
+
+        const modelPayload: any = {
+          nombre: modelData.nombre,
+          tipo_equipo: modelData.tipoEquipo,
+        };
+        if (brandIdForModel) {
+          modelPayload.marca_id = brandIdForModel;
+        }
+
+        const { data: insertedModel, error: mErr } = await supabase
+          .from('modelos')
+          .insert([modelPayload])
+          .select('id, marca_id, nombre, tipo_equipo')
+          .single();
+
+        if (insertedModel) {
+          createdModelIds.set(key, insertedModel.id);
+        } else {
+          const { data: existingM } = await supabase
+            .from('modelos')
+            .select('id, marca_id, nombre, tipo_equipo')
+            .ilike('nombre', modelData.nombre)
+            .maybeSingle();
+
+          if (existingM) {
+            createdModelIds.set(key, existingM.id);
+          } else {
+            console.error('Error al insertar modelo en base de datos:', mErr);
+          }
+        }
+      } catch (err) {
+        console.error('Error de red al insertar modelo:', err);
+      }
+    }
+
+    // Helpers para resolver IDs reales (existentes o recién creados)
+    const resolveMarcaId = (brandName?: string | null): string | null => {
+      if (!brandName) return null;
+      const bKey = brandName.trim().toLowerCase();
+      return createdBrandIds.get(bKey) || findMatchingMarca(brandName)?.id || null;
+    };
+
+    const resolveModeloId = (modelName?: string | null, marcaId?: string | null): string | null => {
+      if (!modelName) return null;
+      const mKey = modelName.trim().toLowerCase();
+      return createdModelIds.get(mKey) || findMatchingModelo(modelName, marcaId)?.id || null;
+    };
+
+    // 5. Separar registros aprobados en dos grupos según tipo
     const camarasToInsert: ProcessedRow[] = [];
     const puntosToInsert: ProcessedRow[] = [];
 
-    validRows.forEach(r => {
+    approvedRows.forEach(r => {
       const lowerTipo = r.tipo.toLowerCase();
       if (lowerTipo.includes('camara')) {
         camarasToInsert.push(r);
@@ -339,18 +668,23 @@ export const ImportDevicesModal: React.FC<ImportDevicesModalProps> = ({
         errorsList.push({
           row: r.index,
           codigo: r.codigo,
-          motivo: `Tipo "${r.tipo}" no reconocido para inserción`,
+          motivo: `Tipo de dispositivo "${r.tipo}" no reconocido para inserción`,
           raw: r
         });
       }
     });
 
-    // 4. Inserción en tabla 'camaras'
+    // 6. Inserción en tabla 'camaras' (admite marca y modelo en texto e IDs)
     for (const item of camarasToInsert) {
+      const marcaId = resolveMarcaId(item.marca);
+      const modeloId = resolveModeloId(item.modelo, marcaId);
+
       const payload: any = {
         codigo: item.codigo.trim(),
         estado_ciclo_vida: 'en_bodega',
         ubicacion_especifica: item.ubicacion ? item.ubicacion.trim() : null,
+        marca_id: marcaId,
+        modelo_id: modeloId,
         marca: item.marca ? item.marca.trim() : null,
         modelo: item.modelo ? item.modelo.trim() : null,
         direccion_mac: item.mac ? item.mac.trim() : null,
@@ -358,20 +692,27 @@ export const ImportDevicesModal: React.FC<ImportDevicesModalProps> = ({
       };
 
       try {
-        const { error } = await supabase.from('camaras').insert([payload]);
+        let { error } = await supabase.from('camaras').insert([payload]);
+
+        // Si la tabla no tiene columnas de texto 'marca' o 'modelo', reintentar solo con marca_id y modelo_id
+        if (
+          error &&
+          (error.code === '42703' ||
+            error.message?.toLowerCase().includes('column "marca"') ||
+            error.message?.toLowerCase().includes('column "modelo"'))
+        ) {
+          const fallbackPayload = { ...payload };
+          delete fallbackPayload.marca;
+          delete fallbackPayload.modelo;
+          const retry = await supabase.from('camaras').insert([fallbackPayload]);
+          error = retry.error;
+        }
+
         if (error) {
-          let motivo = error.message;
-          if (
-            error.code === '23505' ||
-            error.message?.toLowerCase().includes('duplicate key') ||
-            error.message?.toLowerCase().includes('unique')
-          ) {
-            motivo = 'El código ya existe';
-          }
           errorsList.push({
             row: item.index,
             codigo: item.codigo,
-            motivo,
+            motivo: translateErrorMessage(error),
             raw: item
           });
         } else {
@@ -381,14 +722,17 @@ export const ImportDevicesModal: React.FC<ImportDevicesModalProps> = ({
         errorsList.push({
           row: item.index,
           codigo: item.codigo,
-          motivo: err?.message || 'Error de conexión al insertar cámara',
+          motivo: err?.message ? translateErrorMessage(err.message) : 'Error de conexión a la base de datos',
           raw: item
         });
       }
     }
 
-    // 5. Inserción en tabla 'puntos_red'
+    // 7. Inserción en tabla 'puntos_red' (solo usa marca_id y modelo_id)
     for (const item of puntosToInsert) {
+      const marcaId = resolveMarcaId(item.marca);
+      const modeloId = resolveModeloId(item.modelo, marcaId);
+
       let tipoPunto: 'datos_funcionario' | 'datos_alumno' | 'wifi_ap' = 'wifi_ap';
       if (item.tipo.includes('funcionario')) {
         tipoPunto = 'datos_funcionario';
@@ -398,30 +742,39 @@ export const ImportDevicesModal: React.FC<ImportDevicesModalProps> = ({
         tipoPunto = 'wifi_ap';
       }
 
+      // Si no existe ID de catálogo pero hay texto ingresado, anexar como referencia en ubicacion_especifica
+      let ubicacionFinal = item.ubicacion ? item.ubicacion.trim() : '';
+      const referenciasNoCatalogo = [
+        !marcaId && item.marca ? `Marca: ${item.marca.trim()}` : null,
+        !modeloId && item.modelo ? `Modelo: ${item.modelo.trim()}` : null,
+      ].filter(Boolean).join(' | ');
+
+      if (referenciasNoCatalogo) {
+        ubicacionFinal = ubicacionFinal
+          ? `${ubicacionFinal} [${referenciasNoCatalogo}]`
+          : `[${referenciasNoCatalogo}]`;
+      }
+
+      // En puntos_red NO existen columnas 'marca' ni 'modelo', solo marca_id y modelo_id
       const payload: any = {
         codigo: item.codigo.trim(),
         tipo_punto: tipoPunto,
         estado_ciclo_vida: 'en_bodega',
-        ubicacion_especifica: item.ubicacion ? item.ubicacion.trim() : null,
+        ubicacion_especifica: ubicacionFinal || null,
+        marca_id: marcaId,
+        modelo_id: modeloId,
         direccion_mac: item.mac ? item.mac.trim() : null,
         direccion_ip: item.ip ? item.ip.trim() : null,
       };
 
       try {
         const { error } = await supabase.from('puntos_red').insert([payload]);
+
         if (error) {
-          let motivo = error.message;
-          if (
-            error.code === '23505' ||
-            error.message?.toLowerCase().includes('duplicate key') ||
-            error.message?.toLowerCase().includes('unique')
-          ) {
-            motivo = 'El código ya existe';
-          }
           errorsList.push({
             row: item.index,
             codigo: item.codigo,
-            motivo,
+            motivo: translateErrorMessage(error),
             raw: item
           });
         } else {
@@ -431,10 +784,22 @@ export const ImportDevicesModal: React.FC<ImportDevicesModalProps> = ({
         errorsList.push({
           row: item.index,
           codigo: item.codigo,
-          motivo: err?.message || 'Error de conexión al insertar punto de red',
+          motivo: err?.message ? translateErrorMessage(err.message) : 'Error de conexión a la base de datos',
           raw: item
         });
       }
+    }
+
+    // 8. Actualizar catálogos en memoria tras crear marcas o modelos
+    try {
+      const [{ data: updatedMarcas }, { data: updatedModelos }] = await Promise.all([
+        supabase.from('marcas').select('id, nombre').order('nombre'),
+        supabase.from('modelos').select('id, marca_id, nombre, tipo_equipo').order('nombre')
+      ]);
+      if (updatedMarcas) setMarcasList(updatedMarcas as Marca[]);
+      if (updatedModelos) setModelosList(updatedModelos as Modelo[]);
+    } catch (e) {
+      console.error('Error al actualizar catálogos en memoria:', e);
     }
 
     // Ordenar errores por orden de aparición en el CSV
@@ -455,11 +820,11 @@ export const ImportDevicesModal: React.FC<ImportDevicesModalProps> = ({
     setStep(4);
   };
 
-  // Step 4: Download error log
+  // Step 4: Download error log (100% en español)
   const handleDownloadErrorLog = () => {
     if (!simulationResult || simulationResult.errorsList.length === 0) return;
 
-    const headers = 'Fila,Codigo,Motivo_Error';
+    const headers = 'Fila,Código,Motivo del Error';
     const rows = simulationResult.errorsList.map(e => `"${e.row}","${e.codigo}","${e.motivo.replace(/"/g, '""')}"`).join('\n');
     const content = `${headers}\n${rows}\n`;
 
@@ -852,60 +1217,120 @@ export const ImportDevicesModal: React.FC<ImportDevicesModalProps> = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
-                      {processedRows.slice(0, 50).map((row) => (
-                        <tr
-                          key={row.index}
-                          className={`hover:bg-slate-50 transition-colors ${
-                            !row.isValid ? 'bg-rose-50/50' : ''
-                          }`}
-                        >
-                          <td className="py-3 px-4 text-center text-slate-400 text-[10px]">
-                            {row.index}
-                          </td>
-                          <td className="py-3 px-4">
-                            {row.isValid ? (
-                              <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200 text-[10px] font-sans font-semibold">
-                                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                                Válido
+                      {processedRows.slice(0, 50).map((row) => {
+                        const cleanMarca = row.marca?.trim();
+                        const hasBrand = Boolean(cleanMarca);
+                        const brandMatch = hasBrand ? findMatchingMarca(cleanMarca) : null;
+                        const isNewBrand = hasBrand && !brandMatch;
+                        const isBrandDeselected = isNewBrand && !selectedNewBrands.includes(cleanMarca!.toLowerCase());
+
+                        const cleanModelo = row.modelo?.trim();
+                        const hasModel = Boolean(cleanModelo);
+                        const modelMatch = hasModel ? findMatchingModelo(cleanModelo, brandMatch?.id) : null;
+                        const isNewModel = hasModel && !modelMatch;
+                        const isModelDeselected = isNewModel && !selectedNewModels.includes(cleanModelo!.toLowerCase());
+
+                        const isNewCatalog = isNewBrand || isNewModel;
+                        const isExcludedBySelection = isBrandDeselected || isModelDeselected;
+
+                        return (
+                          <tr
+                            key={row.index}
+                            className={`hover:bg-slate-50 transition-colors ${
+                              !row.isValid
+                                ? 'bg-rose-50/50'
+                                : isExcludedBySelection
+                                ? 'bg-amber-50/30'
+                                : ''
+                            }`}
+                          >
+                            <td className="py-3 px-4 text-center text-slate-400 text-[10px]">
+                              {row.index}
+                            </td>
+                            <td className="py-3 px-4">
+                              {!row.isValid ? (
+                                <span 
+                                  className="inline-flex items-center gap-1 text-rose-700 bg-rose-100 px-2.5 py-0.5 rounded-full border border-rose-300 text-[10px] font-sans font-semibold"
+                                  title={row.errors.join('; ')}
+                                >
+                                  <AlertCircle className="w-3 h-3 text-rose-600" />
+                                  Error
+                                </span>
+                              ) : isExcludedBySelection ? (
+                                <span
+                                  className="inline-flex items-center gap-1 text-amber-800 bg-amber-100 px-2.5 py-0.5 rounded-full border border-amber-300 text-[10px] font-sans font-semibold"
+                                  title={
+                                    isBrandDeselected && isModelDeselected
+                                      ? 'Marca y modelo no seleccionados para crear en el catálogo'
+                                      : isBrandDeselected
+                                      ? 'Marca no seleccionada para crear en el catálogo'
+                                      : 'Modelo no seleccionado para crear en el catálogo'
+                                  }
+                                >
+                                  <AlertTriangle className="w-3 h-3 text-amber-600" />
+                                  Omitido
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200 text-[10px] font-sans font-semibold">
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                  Válido
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 font-bold text-slate-900">
+                              {row.codigo || <span className="text-rose-500 italic">(Vacío)</span>}
+                            </td>
+                            <td className="py-3 px-4">
+                              <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold tracking-tight ${
+                                row.tipo === 'camara'
+                                  ? 'bg-purple-100 text-purple-800 border border-purple-200'
+                                  : row.tipo === 'wifi_ap'
+                                  ? 'bg-blue-100 text-blue-800 border border-blue-200'
+                                  : 'bg-slate-100 text-slate-700 border border-slate-200'
+                              }`}>
+                                {row.tipo || 'DESCONOCIDO'}
                               </span>
-                            ) : (
-                              <span 
-                                className="inline-flex items-center gap-1 text-rose-700 bg-rose-100 px-2.5 py-0.5 rounded-full border border-rose-300 text-[10px] font-sans font-semibold"
-                                title={row.errors.join('; ')}
-                              >
-                                <AlertCircle className="w-3 h-3 text-rose-600" />
-                                Error
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-3 px-4 font-bold text-slate-900">
-                            {row.codigo || <span className="text-rose-500 italic">(Vacío)</span>}
-                          </td>
-                          <td className="py-3 px-4">
-                            <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold tracking-tight ${
-                              row.tipo === 'camara'
-                                ? 'bg-purple-100 text-purple-800 border border-purple-200'
-                                : row.tipo === 'wifi_ap'
-                                ? 'bg-blue-100 text-blue-800 border border-blue-200'
-                                : 'bg-slate-100 text-slate-700 border border-slate-200'
-                            }`}>
-                              {row.tipo || 'DESCONOCIDO'}
-                            </span>
-                          </td>
-                          <td className="py-3 px-4 text-slate-600">
-                            {row.mac || '-'}
-                          </td>
-                          <td className="py-3 px-4 text-slate-600">
-                            {row.ip || '-'}
-                          </td>
-                          <td className="py-3 px-4 text-slate-600">
-                            {[row.marca, row.modelo].filter(Boolean).join(' / ') || '-'}
-                          </td>
-                          <td className="py-3 px-4 text-slate-500 font-sans truncate max-w-[200px]">
-                            {row.ubicacion || '-'}
-                          </td>
-                        </tr>
-                      ))}
+                            </td>
+                            <td className="py-3 px-4 text-slate-600">
+                              {row.mac || '-'}
+                            </td>
+                            <td className="py-3 px-4 text-slate-600">
+                              {row.ip || '-'}
+                            </td>
+                            <td className="py-3 px-4 text-slate-600">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="font-medium text-slate-700">
+                                  {[row.marca, row.modelo].filter(Boolean).join(' / ') || '-'}
+                                </span>
+                                {isExcludedBySelection ? (
+                                  <span
+                                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-sans font-bold bg-rose-100 text-rose-800 border border-rose-300 whitespace-nowrap"
+                                    title="No autorizado para creación en catálogo; se excluirá de la importación"
+                                  >
+                                    No autorizado
+                                  </span>
+                                ) : isNewCatalog ? (
+                                  <span
+                                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-sans font-bold bg-amber-100 text-amber-800 border border-amber-300 whitespace-nowrap"
+                                    title={
+                                      isNewBrand && isNewModel
+                                        ? 'Marca y Modelo nuevos (se registrarán en el catálogo maestro)'
+                                        : isNewBrand
+                                        ? 'Marca nueva (se registrará en el catálogo maestro)'
+                                        : 'Modelo nuevo (se registrará en el catálogo maestro)'
+                                    }
+                                  >
+                                    Catálogo nuevo
+                                  </span>
+                                ) : null}
+                              </div>
+                            </td>
+                            <td className="py-3 px-4 text-slate-500 font-sans truncate max-w-[200px]">
+                              {row.ubicacion || '-'}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -914,11 +1339,128 @@ export const ImportDevicesModal: React.FC<ImportDevicesModalProps> = ({
                   <div className="p-3.5 bg-rose-50 border-t border-rose-200 flex items-center gap-2 text-xs text-rose-800">
                     <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
                     <span>
-                      Hay <strong>{invalidRowsCount}</strong> fila(s) con inconsistencias. Los registros con error no serán importados y se guardarán en la bitácora de fallos.
+                      Hay <strong>{invalidRowsCount}</strong> fila(s) con inconsistencias de formato. Los registros con error no serán importados y se guardarán en la bitácora de fallos.
                     </span>
                   </div>
                 )}
               </div>
+
+              {/* Panel de Advertencia y Selección de Nuevos Catálogos (Marcas y Modelos) */}
+              {(detectedNewCatalog.brands.length > 0 || detectedNewCatalog.models.length > 0) && (
+                <div className="bg-amber-50/80 border border-amber-200 rounded-xl p-5 shadow-xs space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-amber-200/80 pb-3">
+                    <div className="flex items-center gap-2.5">
+                      <div className="p-2 bg-amber-100 text-amber-800 rounded-lg border border-amber-200">
+                        <AlertTriangle className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-bold text-amber-950 uppercase tracking-wider">
+                          Nuevas Marcas y Modelos Detectados
+                        </h4>
+                        <p className="text-[11px] text-amber-800 font-sans mt-0.5">
+                          Se detectaron elementos que no existen en el catálogo maestro. Selecciona cuáles deseas autorizar y registrar automáticamente.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={handleSelectAllNew}
+                        className="px-3 py-1 text-[11px] font-semibold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg transition-colors cursor-pointer"
+                      >
+                        Seleccionar Todos
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDeselectAllNew}
+                        className="px-3 py-1 text-[11px] font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-amber-200 rounded-lg transition-colors cursor-pointer"
+                      >
+                        Deseleccionar Todos
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Texto de ayuda requerido */}
+                  <div className="text-xs text-amber-900 bg-amber-100/70 border border-amber-300/80 rounded-lg p-2.5 flex items-start gap-2">
+                    <HelpCircle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                    <span className="italic font-medium">
+                      Los elementos no seleccionados no se agregarán al catálogo y los dispositivos que dependan de ellos no serán importados.
+                    </span>
+                  </div>
+
+                  {/* Listados de selección en 2 columnas */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* Marcas nuevas */}
+                    {detectedNewCatalog.brands.length > 0 && (
+                      <div className="bg-white rounded-lg border border-amber-200 p-3.5 space-y-2">
+                        <div className="flex items-center justify-between text-xs font-bold text-slate-800 pb-1.5 border-b border-slate-100">
+                          <span>Nuevas Marcas ({detectedNewCatalog.brands.length})</span>
+                          <span className="text-[10px] text-slate-400 font-mono">Tabla: marcas</span>
+                        </div>
+                        <div className="max-h-44 overflow-y-auto space-y-1.5 pr-1">
+                          {detectedNewCatalog.brands.map(b => (
+                            <label
+                              key={b.key}
+                              className="flex items-center justify-between p-2 rounded-md hover:bg-amber-50/50 cursor-pointer text-xs border border-transparent hover:border-amber-200 transition-colors"
+                            >
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedNewBrands.includes(b.key)}
+                                  onChange={() => handleToggleBrand(b.key)}
+                                  className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer"
+                                />
+                                <span className="font-semibold text-slate-800">{b.nombre}</span>
+                              </div>
+                              <span className="text-[10px] text-slate-500 bg-slate-100 px-2 py-0.5 rounded font-mono">
+                                {b.count} equipo{b.count > 1 ? 's' : ''}
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Modelos nuevos */}
+                    {detectedNewCatalog.models.length > 0 && (
+                      <div className="bg-white rounded-lg border border-amber-200 p-3.5 space-y-2">
+                        <div className="flex items-center justify-between text-xs font-bold text-slate-800 pb-1.5 border-b border-slate-100">
+                          <span>Nuevos Modelos ({detectedNewCatalog.models.length})</span>
+                          <span className="text-[10px] text-slate-400 font-mono">Tabla: modelos</span>
+                        </div>
+                        <div className="max-h-44 overflow-y-auto space-y-1.5 pr-1">
+                          {detectedNewCatalog.models.map(m => (
+                            <label
+                              key={m.key}
+                              className="flex items-center justify-between p-2 rounded-md hover:bg-amber-50/50 cursor-pointer text-xs border border-transparent hover:border-amber-200 transition-colors"
+                            >
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedNewModels.includes(m.key)}
+                                  onChange={() => handleToggleModel(m.key)}
+                                  className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer"
+                                />
+                                <div>
+                                  <span className="font-semibold text-slate-800 block">{m.nombre}</span>
+                                  {m.marcaNombre && (
+                                    <span className="text-[10px] text-slate-400 block font-sans">
+                                      Marca: {m.marcaNombre}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <span className="text-[10px] text-slate-500 bg-slate-100 px-2 py-0.5 rounded font-mono">
+                                {m.count} equipo{m.count > 1 ? 's' : ''}
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
