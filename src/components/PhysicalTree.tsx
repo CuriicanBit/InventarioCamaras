@@ -310,7 +310,7 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
         supabase.from('equipos').select('*').order('posicion_u_inicio', { ascending: false }),
         supabase.from('camaras').select('*').order('codigo'),
         supabase.from('puntos_red').select('id, rack_id'),
-        supabase.from('v_sin_asignar').select('id'),
+        supabase.from('v_inventario_global').select('id').neq('estado_ciclo_vida', 'instalado'),
       ]);
 
       setUnassignedCount(unassignedData?.length || 0);

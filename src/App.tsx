@@ -18,6 +18,7 @@ import { NetworkPointForm } from './components/NetworkPointForm';
 import { TopologyView } from './components/TopologyView';
 import { supabase } from './lib/supabase';
 import { Rack, Camara, Equipo, PuntoRed } from './types/database';
+import { AssetManagement } from './components/AssetManagement';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<NavView>('explorador');
@@ -41,7 +42,11 @@ export default function App() {
 
   const fetchUnassignedCount = async () => {
     try {
-      const { data } = await supabase.from('v_sin_asignar').select('id');
+      // Contamos los equipos que NO están instalados (en bodega + retirados)
+      const { data } = await supabase
+        .from('v_inventario_global')
+        .select('id')
+        .neq('estado_ciclo_vida', 'instalado');
       setUnassignedCount(data?.length || 0);
     } catch (err) {
       console.error('Error fetching unassigned count:', err);
@@ -73,7 +78,7 @@ export default function App() {
         ] = await Promise.all([
           supabase.from('racks').select('*').order('codigo').limit(1),
           supabase.from('camaras').select('*').order('codigo').limit(1),
-          supabase.from('v_sin_asignar').select('id'),
+          supabase.from('v_inventario_global').select('id').neq('estado_ciclo_vida', 'instalado'),
           supabase.from('camaras').select('id').neq('estado_ciclo_vida', 'instalado'),
           supabase.from('equipos').select('id').neq('estado_ciclo_vida', 'instalado'),
         ]);
@@ -86,7 +91,7 @@ export default function App() {
           setSelectedCamera(found08);
         }
         setUnassignedCount(uData?.length || 0);
-        setWarehouseCount((whCams?.length || 0) + (whEqs?.length || 0));
+        setWarehouseCount(uData?.length || 0);
       } catch (err) {
         console.error('Error bootstrapping app data:', err);
       } finally {
@@ -447,6 +452,16 @@ export default function App() {
 
         {currentView === 'catalogos' && (
           <CatalogsView />
+        )}
+
+        {currentView === 'activos' && (
+          <AssetManagement
+            onSelectCamera={(camId) => {
+              // Opcional: Buscar la cámara y navegar a su detalle
+              console.log('Cámara seleccionada:', camId);
+            }}
+            onNavigateToPorts={(eqId) => handleNavigateToPorts(eqId)}
+          />
         )}
 
         {currentView === 'topologia' && (

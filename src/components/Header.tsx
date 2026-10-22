@@ -16,7 +16,8 @@ import {
   ChevronRight,
   BarChart3,
   Network,
-  Cable
+  Cable,
+  Box
 } from 'lucide-react';
 import { NodoUALogo } from './NodoUALogo';
 
@@ -36,7 +37,8 @@ export type NavView =
   | 'reportes'
   | 'bodega_bajas'
   | 'sin_asignar'
-  | 'catalogos';
+  | 'catalogos'
+  | 'activos';
 
 interface HeaderProps {
   currentView: NavView;
@@ -110,18 +112,12 @@ export const Header: React.FC<HeaderProps> = ({
     { id: 'inventario', label: 'Inventario General', icon: <ListFilter className="w-3.5 h-3.5" /> },
     { id: 'reportes', label: 'Reportes', icon: <BarChart3 className="w-3.5 h-3.5" /> },
     { id: 'planimetria', label: 'Planimetría FOV', icon: <MapPin className="w-3.5 h-3.5" /> },
+    
     { 
-      id: 'bodega_bajas', 
-      label: 'Bodega / Bajas', 
-      icon: <Archive className="w-3.5 h-3.5" />, 
-      badge: warehouseCount, 
-      badgeColor: 'amber' 
-    },
-    { 
-      id: 'sin_asignar', 
-      label: 'Sin Asignar', 
-      icon: <Inbox className="w-3.5 h-3.5" />, 
-      badge: unassignedCount, 
+      id: 'activos', 
+      label: 'Gestión de Activos', 
+      icon: <Box className="w-3.5 h-3.5" />, 
+      badge: warehouseCount + unassignedCount,
       badgeColor: 'blue' 
     },
     { id: 'catalogos', label: 'Catálogos', icon: <Tag className="w-3.5 h-3.5" /> },
@@ -163,6 +159,7 @@ export const Header: React.FC<HeaderProps> = ({
       case 'sin_asignar': return 'Bandeja de Dispositivos Sin Asignación Jerárquica';
       case 'catalogos': return 'Gestor de Catálogos (Marcas, Modelos y Proveedores)';
       case 'topologia': return 'Topología de Red (Enlaces Troncales y Conmutación)';
+      case 'activos': return 'Gestión de Activos (Limbo, Bodega y Dados de Baja)';
       default: return 'NodoUA · Sistema de Planta Física e Infraestructura';
     }
   };
