@@ -325,7 +325,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
 
     exportReportToExcel({
       title: 'Reporte de Ocupación de Red (Norma 75%)',
-      subtitle: 'CCTV InfraRegistro · Control de Capacidad en Switches, NVRs y Patch Panels',
+      subtitle: 'NodoUA · Control de Capacidad en Switches, NVRs y Patch Panels · Universidad Autónoma de Chile',
       filename: `Reporte_Ocupacion_Red_${new Date().toISOString().slice(0, 10)}`,
       headers,
       rows,
@@ -389,7 +389,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
 
     exportReportToPdf({
       title: 'Reporte de Ocupación de Red (Norma 75%)',
-      subtitle: 'CCTV InfraRegistro · Capacidad de Puertos y Canales en Switches, NVRs y Patch Panels',
+      subtitle: 'NodoUA · Capacidad de Puertos y Canales en Switches, NVRs y Patch Panels · Universidad Autónoma de Chile',
       filename: `Reporte_Ocupacion_Red_${new Date().toISOString().slice(0, 10)}`,
       headers,
       rows,
@@ -511,7 +511,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
 
     exportReportToExcel({
       title: 'Reporte de Revisión PoE e Inyectores',
-      subtitle: 'CCTV InfraRegistro · Evaluación de compatibilidad PoE y alimentación de dispositivos',
+      subtitle: 'NodoUA · Evaluación de compatibilidad PoE y alimentación de dispositivos · Universidad Autónoma de Chile',
       filename: `Reporte_Inyectores_PoE_${new Date().toISOString().slice(0, 10)}`,
       headers,
       rows,
@@ -571,7 +571,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
 
     exportReportToPdf({
       title: 'Reporte de Revisión PoE e Inyectores',
-      subtitle: 'CCTV InfraRegistro · Dispositivos y compatibilidad con puertos switch',
+      subtitle: 'NodoUA · Dispositivos y compatibilidad con puertos switch · Universidad Autónoma de Chile',
       filename: `Reporte_Inyectores_PoE_${new Date().toISOString().slice(0, 10)}`,
       headers,
       rows,

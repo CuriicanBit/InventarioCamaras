@@ -535,7 +535,7 @@ export const LocationInventoryReport: React.FC<LocationInventoryReportProps> = (
 
     exportReportToPdf({
       title: 'Reporte de Inventario por Ubicación Física',
-      subtitle: 'CCTV InfraRegistro · Inventario de Dispositivos y Planta Física (Norma TIA-606-C)',
+      subtitle: 'NodoUA · Inventario de Dispositivos y Planta Física · Universidad Autónoma de Chile',
       filename: `Reporte_Inventario_Ubicacion_${new Date().toISOString().slice(0, 10)}`,
       headers,
       rows,

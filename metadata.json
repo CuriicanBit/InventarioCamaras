@@ -1,6 +1,6 @@
 {
-  "name": "CCTV InfraRegistro - Inventario Técnico Universitario",
-  "description": "Sistema de registro técnico de campo e inventario de infraestructura CCTV, racks y redes para campus universitario.",
+  "name": "NodoUA - Gestión de Infraestructura y Redes",
+  "description": "Sistema de gestión de infraestructura de telecomunicaciones, racks, switches y red para la Universidad Autónoma de Chile.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

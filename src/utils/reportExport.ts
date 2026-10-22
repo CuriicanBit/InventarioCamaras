@@ -34,7 +34,7 @@ export function exportReportToExcel(options: ExportReportOptions): void {
 
   // Header banner inside sheet
   sheetData.push([title.toUpperCase()]);
-  sheetData.push([subtitle || 'CCTV InfraRegistro · Reporte de Planta Física']);
+  sheetData.push([subtitle || 'NodoUA · Reporte de Planta Física · Universidad Autónoma de Chile']);
   sheetData.push([`Fecha de Generación: ${new Date().toLocaleString()}`]);
 
   // Filters row
@@ -95,7 +95,7 @@ export function exportReportToExcel(options: ExportReportOptions): void {
 export function exportReportToPdf(options: ExportReportOptions): void {
   const {
     title,
-    subtitle = 'CCTV InfraRegistro · Infraestructura Física de Telecomunicaciones',
+    subtitle = 'NodoUA · Infraestructura Física de Telecomunicaciones · Universidad Autónoma de Chile',
     filename,
     headers,
     rows,
@@ -219,7 +219,7 @@ export function exportReportToPdf(options: ExportReportOptions): void {
       doc.setFontSize(7.5);
       doc.setTextColor(148, 163, 184); // slate-400
       doc.text(
-        `Página ${data.pageNumber} de ${totalPages} · Sistema CCTV InfraRegistro · Documento Confidencial`,
+        `Página ${data.pageNumber} de ${totalPages} · Sistema NodoUA · Documento Confidencial`,
         14,
         pageHeight - 6
       );

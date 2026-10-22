@@ -43,6 +43,7 @@ export interface AsociarServicioDialogProps {
   puerto_switch_id?: string | null;
   patchPanelId?: string;
   switchId?: string;
+  puntoRedId?: string | null;
   // Props de VLAN (heredadas desde el puerto switch)
   vlan_id?: string | null;
   vlan_numero?: number | null;
@@ -188,6 +189,7 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
   onSelectExistenteCamara,
   onConnectSoloCable,
   loading = false,
+  puntoRedId,
 }) => {
   const hasVlan = Boolean(vlan_numero || vlan_id);
   const vlanColor = color_vlan || '#3b82f6';
@@ -295,6 +297,26 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
   // Sincronizar preselección al abrir o cambiar props
   useEffect(() => {
     if (isOpen) {
+      // Si viene un puntoRedId, abrir directamente en la pestaña "Existente"
+      if (puntoRedId) {
+        const pto = puntosRed.find(p => p.id === puntoRedId);
+        if (pto) {
+          setSelectedKind(pto.tipo_punto as ServicioKind);
+          setIsPreselectedActive(false);
+          setConfirmNoVlan(false);
+          setActiveTab('existente');
+          setSelectedExistenteId(pto.id);
+          setSearchQuery(pto.codigo);
+          setUbicacionPunto('');
+          setSelectedModeloId('');
+          setSelectedAlimentacion('');
+          setIsCodeManuallyEdited(false);
+          setCodigoPunto('');
+          return; // Salimos para no sobreescribir con la lógica de "nuevo"
+        }
+      }
+
+      // Comportamiento normal (crear nuevo)
       const initial = inferKindFromVlanUso(uso_vlan);
       setSelectedKind(initial);
       setIsPreselectedActive(Boolean(initial));
@@ -316,7 +338,7 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
         setCodigoPunto('');
       }
     }
-  }, [isOpen, uso_vlan, puerto_patch]);
+  }, [isOpen, uso_vlan, puerto_patch, puntoRedId, puntosRed]);
 
   // Autogenerar código al cambiar de kind si no ha sido editado manualmente
   const handleSelectKind = (kind: ServicioKind) => {

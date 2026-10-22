@@ -18,6 +18,7 @@ import {
   Network,
   Cable
 } from 'lucide-react';
+import { NodoUALogo } from './NodoUALogo';
 
 export type NavView = 
   | 'explorador' 
@@ -162,7 +163,7 @@ export const Header: React.FC<HeaderProps> = ({
       case 'sin_asignar': return 'Bandeja de Dispositivos Sin Asignación Jerárquica';
       case 'catalogos': return 'Gestor de Catálogos (Marcas, Modelos y Proveedores)';
       case 'topologia': return 'Topología de Red (Enlaces Troncales y Conmutación)';
-      default: return 'Sistema de Infraestructura CCTV';
+      default: return 'NodoUA · Sistema de Planta Física e Infraestructura';
     }
   };
 
@@ -173,23 +174,10 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Brand Identity */}
           <div 
             onClick={() => handleNavClick('explorador')}
-            className="flex items-center gap-2.5 cursor-pointer group shrink-0"
-            title="Ir al Explorador Físico"
+            className="flex items-center cursor-pointer group shrink-0"
+            title="Ir al Explorador Físico - NodoUA"
           >
-            <div className="w-8 h-8 sm:w-9 sm:h-9 bg-slate-900 text-white rounded flex items-center justify-center font-mono font-bold text-xs sm:text-sm tracking-wider shadow-xs group-hover:bg-blue-700 transition-colors shrink-0">
-              <Server className="w-4 h-4 sm:w-5 sm:h-5 text-blue-400" />
-            </div>
-            <div>
-              <div className="font-bold text-slate-900 tracking-tight text-xs sm:text-base flex items-center gap-1.5 leading-none">
-                <span className="truncate">CCTV InfraRegistro</span>
-                <span className="hidden xs:inline-block text-[9px] sm:text-[10px] font-mono font-normal uppercase text-slate-500 bg-slate-100 px-1 py-0.2 rounded border border-slate-200">
-                  v2.4
-                </span>
-              </div>
-              <div className="hidden sm:block text-[9px] sm:text-[10px] font-mono tracking-wider text-slate-500 uppercase mt-0.5">
-                Planta Física · Infraestructura CCTV
-              </div>
-            </div>
+            <NodoUALogo size="md" version="v2.4" />
           </div>
 
           {/* Horizontal Navigation Bar (items that fit comfortably) */}
@@ -313,10 +301,8 @@ export const Header: React.FC<HeaderProps> = ({
           <span className="text-blue-600 font-semibold shrink-0">⚡ Módulo:</span>
           <span className="text-slate-800 font-medium truncate">{getBreadcrumbTitle()}</span>
         </div>
-        <div className="hidden sm:flex items-center gap-3 text-slate-500 text-[10px] shrink-0">
-          <span>Norma ANSI/TIA-606-C</span>
-          <span>•</span>
-          <span>Supabase PostgreSQL</span>
+        <div className="flex items-center text-slate-500 text-[10px] shrink-0 font-normal">
+          <span>Desarrollado por DTI U. Autónoma de Chile, sede Talca.</span>
         </div>
       </div>
     </header>

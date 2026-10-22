@@ -471,3 +471,30 @@ export interface RevisionPoeItem {
   resuelto: boolean;
 }
 
+export type EstadoVisualPuerto = 'ocupado_con_dispositivo' | 'enlace_vacio' | 'puerto_libre';
+
+export interface MapeoPuertoCompleto {
+  switch_codigo: string;
+  puerto_switch_id: string;
+  switch_puerto_numero: number;
+  switch_puerto_tipo: string;
+  vlan_id: string | null;
+  vlan_nombre: string | null;
+  vlan_color: string | null;
+  tramo_cross_connect_id: string | null;
+  cross_connect_estado: string | null;
+  cross_connect_verificacion: string | null;
+  patch_panel_codigo: string | null;
+  puerto_patch_panel_id: string | null;
+  patch_panel_puerto_numero: number | null;
+  tramo_horizontal_id: string | null;
+  horizontal_verificacion: string | null;
+  roseta_codigo: string | null;
+  roseta_ubicacion: string | null;
+  conexion_logica_id: string | null;
+  dispositivo_tipo: 'camara' | 'usuario' | 'access_point' | string | null;
+  dispositivo_codigo: string | null;
+  dispositivo_estado: string | null;
+  estado_visual_puerto: EstadoVisualPuerto;
+}
+

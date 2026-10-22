@@ -849,9 +849,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
         doc.setDrawColor(226, 232, 240);
         doc.line(14, pageHeight - 12, pageWidth - 14, pageHeight - 12);
         doc.setFont('helvetica', 'normal');
-        doc.setFontSize(8);
-        doc.setTextColor(100, 116, 139);
-        doc.text('CCTV InfraRegistro · Dirección de Tecnologías de Información', 14, pageHeight - 7);
+        doc.text('NodoUA · DTI Universidad Autónoma de Chile, sede Talca', 14, pageHeight - 7);
         doc.text(`Página ${pageNum} de ${totalPagesStr}`, pageWidth - 14, pageHeight - 7, { align: 'right' });
       };
 
@@ -950,7 +948,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
       doc.setFontSize(8);
       doc.setTextColor(148, 163, 184);
       doc.text(
-        'Datos sincronizados en tiempo real desde la plataforma CCTV InfraRegistro · Campus Central y Alameda.',
+        'Datos sincronizados en tiempo real desde la plataforma NodoUA · Universidad Autónoma de Chile, sede Talca.',
         20,
         pageHeight - 20
       );

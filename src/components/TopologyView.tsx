@@ -277,7 +277,7 @@ export const TopologyView: React.FC<TopologyViewProps> = ({
 
     exportReportToExcel({
       title: 'Topología de Red · Enlaces Troncales',
-      subtitle: 'CCTV InfraRegistro · Universidad de Talca',
+      subtitle: 'NodoUA · Universidad Autónoma de Chile, sede Talca',
       filename: `topologia_enlaces_${new Date().toISOString().split('T')[0]}`,
       headers: [
         'Superior',

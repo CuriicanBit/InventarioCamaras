@@ -182,7 +182,7 @@ export default function App() {
       <div className="min-h-screen bg-[#f8fafc] flex items-center justify-center font-mono text-xs text-slate-500">
         <div className="flex flex-col items-center gap-3">
           <div className="w-8 h-8 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
-          <span>Iniciando Base de Datos CCTV InfraRegistro...</span>
+          <span>Iniciando Base de Datos NodoUA...</span>
         </div>
       </div>
     );
@@ -468,12 +468,12 @@ export default function App() {
       <footer className="bg-white border-t border-slate-200 py-3 text-[11px] font-mono text-slate-500 mt-auto">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <span className="font-semibold text-slate-800">CCTV InfraRegistro v2.4.2</span>
+            <span className="font-semibold text-slate-800">NodoUA v2.4.2</span>
             <span className="text-slate-300">|</span>
-            <span>Red Campus Central • Soporte Técnico Operativo</span>
+            <span>Desarrollado por DTI U. Autónoma de Chile, sede Talca.</span>
           </div>
           <div>
-            <span>© Infraestructura Universitaria. Uso exclusivo de cuadrilla autorizada.</span>
+            <span>© Infraestructura de Telecomunicaciones · Universidad Autónoma de Chile</span>
           </div>
         </div>
       </footer>
