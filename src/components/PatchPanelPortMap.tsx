@@ -2075,10 +2075,14 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
   ) => {
     try {
       setSavingAction(true);
-      const swPortId = switchPortVlanMap[makePortKey(switchId, switchPort)]?.puerto_switch_id || null;
+      const swPortId = (switchId && switchPort) 
+        ? (switchPortVlanMap[makePortKey(switchId, switchPort)]?.puerto_switch_id || null) 
+        : null;
 
-      // 1. Asegurar enlace físico en tramo_cross_connect
-      await ensureCrossConnect(patchPanelId, patchPort, switchId, switchPort);
+      // 1. Asegurar enlace físico en tramo_cross_connect únicamente si ambos extremos están definidos
+      if (patchPanelId && switchId && patchPort && switchPort) {
+        await ensureCrossConnect(patchPanelId, patchPort, switchId, switchPort);
+      }
 
       // 2. Insertar punto de red
       const { data, error } = await supabase
@@ -2089,10 +2093,10 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
           ubicacion_especifica: ubicacion?.trim() || null,
           piso_id: currentRack?.piso_id || null,
           rack_id: currentRack?.id || null,
-          patch_panel_id: patchPanelId,
-          puerto_patch: patchPort,
-          switch_id: switchId,
-          puerto_switch_id: swPortId,
+          patch_panel_id: patchPanelId || null,
+          puerto_patch: patchPort || null,
+          switch_id: switchId || null,
+          puerto_switch_id: swPortId || null,
           categoria_cable: 'cat6',
           estado_ciclo_vida: 'instalado',
           modelo_id: modeloId || null,
@@ -2104,14 +2108,51 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
       if (error) throw error;
 
       // 3. Conectar mediante la función RPC a la roseta
-      const pp = equipos.find(e => e.id === patchPanelId);
-      const rosetaId = await resolveRosetaId(pp || ({ id: patchPanelId, tipo: 'patch_panel' } as Equipo), patchPort, data.id, data.codigo);
+      const targetEq = (patchPanelId ? equipos.find(e => e.id === patchPanelId) : null) || (switchId ? equipos.find(e => e.id === switchId) : null);
+      const portNumber = patchPort || switchPort || 1;
+      const rosetaId = targetEq ? await resolveRosetaId(targetEq, portNumber, data.id, data.codigo) : null;
+
+      // Asegurar que exista el puerto físico y tramo_horizontal en el Patch Panel hacia la roseta
+      if (patchPanelId && patchPort && rosetaId) {
+        let ppPortId = null;
+        const { data: existingPpPort } = await supabase.from('puertos_patch_panel')
+          .select('id')
+          .eq('patch_panel_id', patchPanelId)
+          .eq('numero_puerto', patchPort)
+          .maybeSingle();
+
+        if (existingPpPort) {
+          ppPortId = existingPpPort.id;
+        } else {
+          const { data: newPpPort } = await supabase.from('puertos_patch_panel')
+            .insert({ patch_panel_id: patchPanelId, numero_puerto: patchPort, estado_manual: 'ok' })
+            .select('id').single();
+          if (newPpPort) ppPortId = newPpPort.id;
+        }
+
+        if (ppPortId) {
+          const { data: existingTh } = await supabase.from('tramo_horizontal')
+            .select('id')
+            .eq('puerto_patch_panel_id', ppPortId)
+            .eq('estado', 'activo')
+            .maybeSingle();
+
+          if (!existingTh) {
+            await supabase.from('tramo_horizontal').insert({
+              puerto_patch_panel_id: ppPortId,
+              roseta_id: rosetaId,
+              estado: 'activo',
+              estado_verificacion: 'sin_verificar'
+            });
+          }
+        }
+      }
+
       if (rosetaId) {
         await handleConnectDispositivoRpc(data.id, rosetaId, 'Técnico de Terreno');
-      } else {
-        await loadRackData();
-        showToast(`Punto ${data.codigo} registrado y conectado exitosamente`, 'success');
       }
+      await loadRackData();
+      showToast(`Punto ${data.codigo} registrado exitosamente`, 'success');
       scheduleCableRecalc();
     } catch (err: any) {
       console.error('Error creating nuevo punto red:', err);
@@ -2135,8 +2176,10 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
     try {
       setSavingAction(true);
 
-      // 1. Asegurar enlace físico en tramo_cross_connect
-      await ensureCrossConnect(patchPanelId, patchPort, switchId, switchPort);
+      // 1. Asegurar enlace físico en tramo_cross_connect únicamente si ambos extremos están definidos
+      if (patchPanelId && switchId && patchPort && switchPort) {
+        await ensureCrossConnect(patchPanelId, patchPort, switchId, switchPort);
+      }
 
       // 2. Insertar cámara
       const { data, error } = await supabase
@@ -2146,10 +2189,10 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
           ubicacion_especifica: ubicacion?.trim() || null,
           piso_id: currentRack?.piso_id || null,
           rack_id: currentRack?.id || null,
-          patch_panel_id: patchPanelId,
-          puerto_patch: patchPort,
-          switch_id: switchId,
-          puerto_switch: `Fa0/${switchPort}`,
+          patch_panel_id: patchPanelId || null,
+          puerto_patch: patchPort || null,
+          switch_id: switchId || null,
+          puerto_switch: (switchId && switchPort) ? `Fa0/${switchPort}` : null,
           modelo_id: modeloId || null,
           alimentacion: alimentacion || null,
           estado_ciclo_vida: 'instalado',
@@ -2160,14 +2203,51 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
       if (error) throw error;
 
       // 3. Conectar mediante la función RPC a la roseta
-      const pp = equipos.find(e => e.id === patchPanelId);
-      const rosetaId = await resolveRosetaId(pp || ({ id: patchPanelId, tipo: 'patch_panel' } as Equipo), patchPort, data.id, data.codigo);
+      const targetEq = (patchPanelId ? equipos.find(e => e.id === patchPanelId) : null) || (switchId ? equipos.find(e => e.id === switchId) : null);
+      const portNumber = patchPort || switchPort || 1;
+      const rosetaId = targetEq ? await resolveRosetaId(targetEq, portNumber, data.id, data.codigo) : null;
+
+      // Asegurar que exista el puerto físico y tramo_horizontal en el Patch Panel hacia la roseta
+      if (patchPanelId && patchPort && rosetaId) {
+        let ppPortId = null;
+        const { data: existingPpPort } = await supabase.from('puertos_patch_panel')
+          .select('id')
+          .eq('patch_panel_id', patchPanelId)
+          .eq('numero_puerto', patchPort)
+          .maybeSingle();
+
+        if (existingPpPort) {
+          ppPortId = existingPpPort.id;
+        } else {
+          const { data: newPpPort } = await supabase.from('puertos_patch_panel')
+            .insert({ patch_panel_id: patchPanelId, numero_puerto: patchPort, estado_manual: 'ok' })
+            .select('id').single();
+          if (newPpPort) ppPortId = newPpPort.id;
+        }
+
+        if (ppPortId) {
+          const { data: existingTh } = await supabase.from('tramo_horizontal')
+            .select('id')
+            .eq('puerto_patch_panel_id', ppPortId)
+            .eq('estado', 'activo')
+            .maybeSingle();
+
+          if (!existingTh) {
+            await supabase.from('tramo_horizontal').insert({
+              puerto_patch_panel_id: ppPortId,
+              roseta_id: rosetaId,
+              estado: 'activo',
+              estado_verificacion: 'sin_verificar'
+            });
+          }
+        }
+      }
+
       if (rosetaId) {
         await handleConnectDispositivoRpc(data.id, rosetaId, 'Técnico de Terreno');
-      } else {
-        await loadRackData();
-        showToast(`Cámara ${data.codigo} creada y conectada exitosamente`, 'success');
       }
+      await loadRackData();
+      showToast(`Cámara ${data.codigo} creada exitosamente`, 'success');
       scheduleCableRecalc();
     } catch (err: any) {
       console.error('Error creating nueva camara:', err);
@@ -2202,8 +2282,10 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
       return;
     }
 
-    const existingPatchEntity = patchPortToEntity[makePortKey(patchPanelId, patchPort)];
+    const patchKey = makePortKey(patchPanelId, patchPort);
+    const existingPatchEntity = patchPortToEntity[patchKey];
     const existingSwitchEntity = switchPortToEntity[makePortKey(switchId, switchPort)];
+    const patchMapeo = patchPanelMapeoMap[patchKey] || (selectedPort?.equipoId === patchPanelId && selectedPort?.portNum === patchPort ? selectedPort.mapeo : null);
 
     if (existingPatchEntity?.camara || existingSwitchEntity?.camara) {
       const cam = existingPatchEntity?.camara || existingSwitchEntity?.camara;
@@ -2215,6 +2297,19 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
       const punto = existingPatchEntity?.punto || existingSwitchEntity?.punto;
       await handleConnectPuntoRed(patchPanelId, patchPort, switchId, switchPort, punto!.id);
       return;
+    }
+
+    if (patchMapeo?.dispositivo_codigo) {
+      const cam = camaras.find(c => c.codigo === patchMapeo.dispositivo_codigo);
+      if (cam) {
+        await handleConnectCamera(patchPanelId, patchPort, switchId, switchPort, cam.id);
+        return;
+      }
+      const punto = puntosRed.find(p => p.codigo === patchMapeo.dispositivo_codigo);
+      if (punto) {
+        await handleConnectPuntoRed(patchPanelId, patchPort, switchId, switchPort, punto.id);
+        return;
+      }
     }
 
     // Inspect switch port VLAN and usage to set default suggestions in modal
@@ -2233,13 +2328,11 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
       defaultTab = 'camara';
     }
 
-    // --- NUEVO: Buscar si ya hay un dispositivo conectado en este puerto del Patch Panel ---
+    // --- Consultamos la base de datos directamente por si el estado local no ha refrescado ---
     let inheritedDeviceCode = null;
     let inheritedDeviceType = null;
-    let inheritedDeviceUbicacion = null;
     let inheritedDeviceId = null;
 
-    // Consultamos la base de datos directamente para evitar problemas de estado
     const ppPortRes = await supabase.from('puertos_patch_panel').select('id').eq('patch_panel_id', patchPanelId).eq('numero_puerto', patchPort).maybeSingle();
     if (ppPortRes.data) {
       const thRes = await supabase.from('tramo_horizontal').select('roseta_id').eq('puerto_patch_panel_id', ppPortRes.data.id).eq('estado', 'activo').maybeSingle();
@@ -2249,41 +2342,40 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
            inheritedDeviceCode = clRes.data.dispositivo_codigo;
            inheritedDeviceType = clRes.data.dispositivo_tipo;
            inheritedDeviceId = clRes.data.dispositivo_id;
-           
-           // Buscar la ubicación del dispositivo
-           if (inheritedDeviceType === 'camara') {
-              const { data: cam } = await supabase.from('camaras').select('ubicacion_especifica').eq('id', inheritedDeviceId).single();
-              if (cam) inheritedDeviceUbicacion = cam.ubicacion_especifica;
-           } else {
-              const { data: pt } = await supabase.from('puntos_red').select('ubicacion_especifica').eq('id', inheritedDeviceId).single();
-              if (pt) inheritedDeviceUbicacion = pt.ubicacion_especifica;
-           }
         }
       }
     }
 
-    // Configurar los datos del modal
-    if (inheritedDeviceCode) {
-       setNuevoPuntoCodigo(inheritedDeviceCode);
-       setNuevoPuntoUbicacion(inheritedDeviceUbicacion || '');
-    } else {
-       setNuevoPuntoCodigo(`${defaultCodePrefix}P${String(patchPort).padStart(2, '0')}`);
-       setNuevoPuntoUbicacion('');
+    // Si ya tiene un dispositivo conectado en este puerto del Patch Panel, CONECTAR DIRECTAMENTE SIN ABRIR EL MODAL
+    if (inheritedDeviceId || inheritedDeviceCode) {
+      const devId = inheritedDeviceId 
+        || camaras.find(c => c.codigo === inheritedDeviceCode)?.id 
+        || puntosRed.find(p => p.codigo === inheritedDeviceCode)?.id;
+      if (devId) {
+        if (inheritedDeviceType === 'camara') {
+          await handleConnectCamera(patchPanelId, patchPort, switchId, switchPort, devId);
+        } else {
+          await handleConnectPuntoRed(patchPanelId, patchPort, switchId, switchPort, devId);
+        }
+        return;
+      }
     }
-    
+
+    // Si el puerto no tiene dispositivo registrado, abrir el modal para asociar nuevo
+    setNuevoPuntoCodigo(`${defaultCodePrefix}P${String(patchPort).padStart(2, '0')}`);
+    setNuevoPuntoUbicacion('');
     setNuevoPuntoTipo(defaultTipo);
     setPuntoSearchQuery('');
     setCamaraSearchQuery('');
 
-    // Abrir el modal en la pestaña correcta (si hay dispositivo, abrir en "Existente")
     setAssignModal({
       isOpen: true,
       patchPanelId,
       patchPort,
       switchId,
       switchPort,
-      activeTab: inheritedDeviceType === 'camara' ? 'camara' : (inheritedDeviceCode ? 'punto_red' : defaultTab),
-      subTab: inheritedDeviceCode ? 'existente' : 'nuevo'
+      activeTab: defaultTab,
+      subTab: 'nuevo'
     });
   };
 
@@ -2605,8 +2697,11 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
       : (patchPanelMapeoMap[key] || patchPanelMapeoMap[`${eq.codigo}:${pNum}`]);
 
     // Determinar estado_visual_puerto según la vista v_mapeo_puertos_completo
+    // Determinar estado_visual_puerto según la vista v_mapeo_puertos_completo o dispositivos asociados
     let estadoVisual: EstadoVisualPuerto = 'puerto_libre';
-    if (portMapeo?.estado_visual_puerto) {
+    if (portMapeo?.dispositivo_codigo || entity?.camara || entity?.punto) {
+      estadoVisual = 'ocupado_con_dispositivo';
+    } else if (portMapeo?.estado_visual_puerto) {
       estadoVisual = portMapeo.estado_visual_puerto;
     } else if (entity?.estadoVisual) {
       estadoVisual = entity.estadoVisual;
@@ -2620,8 +2715,8 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
       estadoVisual = 'ocupado_con_dispositivo';
     }
 
-    const isOccupied = estadoVisual === 'ocupado_con_dispositivo';
-    const isEnlaceVacio = estadoVisual === 'enlace_vacio';
+    const isOccupied = estadoVisual === 'ocupado_con_dispositivo' || Boolean(portMapeo?.dispositivo_codigo || entity?.camara || entity?.punto);
+    const isEnlaceVacio = estadoVisual === 'enlace_vacio' && !isOccupied;
 
     // Resolución de VLAN asignada
     let swVlan = null;
@@ -4923,6 +5018,26 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
                     <Cable className="w-3.5 h-3.5 text-blue-400" />
                     <span>Conectar Cable Desde Aquí</span>
                   </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const isPatch = selectedPort.tipo === 'patch_panel';
+                      setAssignModal({
+                        isOpen: true,
+                        patchPanelId: isPatch ? selectedPort.equipoId : '',
+                        patchPort: isPatch ? selectedPort.portNum : 0,
+                        switchId: !isPatch ? selectedPort.equipoId : '',
+                        switchPort: !isPatch ? selectedPort.portNum : 0,
+                        activeTab: 'punto_red',
+                        subTab: 'nuevo'
+                      });
+                    }}
+                    className="w-full flex items-center justify-center gap-1.5 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded text-xs font-semibold transition-colors cursor-pointer shadow-2xs"
+                  >
+                    <Plus className="w-4 h-4 text-blue-600" />
+                    <span>+ Registrar Dispositivo Aquí</span>
+                  </button>
                 </div>
               </div>
             )}
@@ -4941,13 +5056,15 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
           <AsociarServicioDialog
             isOpen={assignModal.isOpen}
             onClose={() => setAssignModal(null)}
-            codigo_patch={pp?.codigo || 'Patch Panel'}
+            codigo_patch={pp?.codigo || (assignModal.patchPanelId ? 'Patch Panel' : '')}
             puerto_patch={assignModal.patchPort}
-            codigo_switch={sw?.codigo || 'Switch'}
+            codigo_switch={sw?.codigo || (assignModal.switchId ? 'Switch' : '')}
             puerto_switch={assignModal.switchPort}
             puerto_switch_id={swVlanInfo?.puerto_switch_id}
             patchPanelId={assignModal.patchPanelId}
             switchId={assignModal.switchId}
+            activeTab={assignModal.activeTab}
+            subTab={assignModal.subTab}
             vlan_id={swVlanInfo?.vlan_id}
             vlan_numero={swVlanInfo?.vlan_numero}
             vlan_nombre={swVlanInfo?.vlan_nombre}
@@ -4986,6 +5103,10 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
                   alimentacion
                 );
               }
+              setAssignModal(null);
+              setSelectedPort(null);
+              await loadRackData();
+              scheduleCableRecalc();
             }}
             onSelectExistentePunto={async (puntoId) => {
               const pp = equipos.find(e => e.id === assignModal.patchPanelId);
@@ -4994,6 +5115,9 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
                 const connected = await handleConnectDispositivoRpc(puntoId, rosetaId, 'Técnico de Terreno');
                 if (connected) {
                   setAssignModal(null);
+                  setSelectedPort(null);
+                  await loadRackData();
+                  scheduleCableRecalc();
                   return;
                 }
               }
@@ -5006,6 +5130,9 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
                 puntoId
               );
               setAssignModal(null);
+              setSelectedPort(null);
+              await loadRackData();
+              scheduleCableRecalc();
             }}
             onSelectExistenteCamara={async (camaraId) => {
               const pp = equipos.find(e => e.id === assignModal.patchPanelId);
@@ -5014,6 +5141,9 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
                 const connected = await handleConnectDispositivoRpc(camaraId, rosetaId, 'Técnico de Terreno');
                 if (connected) {
                   setAssignModal(null);
+                  setSelectedPort(null);
+                  await loadRackData();
+                  scheduleCableRecalc();
                   return;
                 }
               }
@@ -5025,6 +5155,9 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
                 camaraId
               );
               setAssignModal(null);
+              setSelectedPort(null);
+              await loadRackData();
+              scheduleCableRecalc();
             }}
             onConnectSoloCable={async () => {
               const { tramoId } = await ensureCrossConnect(assignModal.patchPanelId, assignModal.patchPort, assignModal.switchId, assignModal.switchPort);
@@ -5034,6 +5167,7 @@ export const PatchPanelPortMap: React.FC<PatchPanelPortMapProps> = ({
                 showToast('Error al crear el cable físico', 'error');
               }
               setAssignModal(null);
+              setSelectedPort(null);
               await loadRackData();
               scheduleCableRecalc();
             }}

@@ -44,6 +44,8 @@ export interface AsociarServicioDialogProps {
   patchPanelId?: string;
   switchId?: string;
   puntoRedId?: string | null;
+  activeTab?: 'punto_red' | 'camara' | 'directo' | 'nuevo' | 'existente';
+  subTab?: 'nuevo' | 'existente';
   // Props de VLAN (heredadas desde el puerto switch)
   vlan_id?: string | null;
   vlan_numero?: number | null;
@@ -177,6 +179,8 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
   puerto_switch_id,
   patchPanelId,
   switchId,
+  activeTab: activeTabProp,
+  subTab: subTabProp,
   vlan_id,
   vlan_numero,
   vlan_nombre,
@@ -191,7 +195,10 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
   loading = false,
   puntoRedId,
 }) => {
-  const hasVlan = Boolean(vlan_numero || vlan_id);
+  const isDefaultSwitchCode = !codigo_switch || codigo_switch.trim() === '' || codigo_switch.trim().toLowerCase() === 'switch';
+  const hasSwitch = !isDefaultSwitchCode && Boolean(puerto_switch && puerto_switch > 0);
+
+  const hasVlan = Boolean(hasSwitch && (vlan_numero || vlan_id));
   const vlanColor = color_vlan || '#3b82f6';
 
   // 1) Preselección inicial según vlans.uso
@@ -316,12 +323,19 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
         }
       }
 
-      // Comportamiento normal (crear nuevo)
-      const initial = inferKindFromVlanUso(uso_vlan);
+      // Comportamiento normal (crear nuevo o forzado por props)
+      let initial = inferKindFromVlanUso(uso_vlan);
+      if (!initial) {
+        if (activeTabProp === 'punto_red') {
+          initial = 'wifi_ap';
+        } else if (activeTabProp === 'camara') {
+          initial = 'camara_cctv';
+        }
+      }
       setSelectedKind(initial);
       setIsPreselectedActive(Boolean(initial));
       setConfirmNoVlan(false);
-      setActiveTab('nuevo');
+      setActiveTab(subTabProp || (activeTabProp === 'existente' ? 'existente' : 'nuevo'));
       setUbicacionPunto('');
       setSelectedModeloId('');
       setSelectedAlimentacion('');
@@ -332,13 +346,13 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
       if (initial && initial !== 'solo_cable') {
         const option = KIND_OPTIONS.find((k) => k.kind === initial);
         const prefix = option ? option.codePrefix : 'PR';
-        const pNum = String(puerto_patch).padStart(2, '0');
+        const pNum = String(puerto_patch || puerto_switch || 1).padStart(2, '0');
         setCodigoPunto(`${prefix}-P${pNum}-01`);
       } else {
         setCodigoPunto('');
       }
     }
-  }, [isOpen, uso_vlan, puerto_patch, puntoRedId, puntosRed]);
+  }, [isOpen, uso_vlan, puerto_patch, puerto_switch, puntoRedId, puntosRed, activeTabProp, subTabProp]);
 
   // Autogenerar código al cambiar de kind si no ha sido editado manualmente
   const handleSelectKind = (kind: ServicioKind) => {
@@ -444,8 +458,8 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
 
   // Validación para habilitar el botón primario del Footer
   const isFormValid = useMemo(() => {
-    // Si no tiene VLAN, requiere confirmación explícita
-    if (!hasVlan && !confirmNoVlan) {
+    // Si hay un switch y no tiene VLAN, requiere confirmación explícita
+    if (hasSwitch && !hasVlan && !confirmNoVlan) {
       return false;
     }
 
@@ -466,7 +480,7 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
     }
 
     return false;
-  }, [hasVlan, confirmNoVlan, selectedKind, activeTab, codigoPunto, selectedExistenteId]);
+  }, [hasSwitch, hasVlan, confirmNoVlan, selectedKind, activeTab, codigoPunto, selectedExistenteId]);
 
   // Handler de envío final
   const handleSubmit = async () => {
@@ -508,7 +522,7 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
         className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-xl w-full overflow-hidden transition-all duration-180 ease-out animate-in fade-in zoom-in-95 my-auto"
         style={{
           borderTopWidth: '4px',
-          borderTopColor: hasVlan ? vlanColor : '#f59e0b',
+          borderTopColor: hasSwitch ? (hasVlan ? vlanColor : '#f59e0b') : '#2563eb',
         }}
       >
         {/* ======================================================== */}
@@ -520,19 +534,19 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
               <div
                 className="p-2 rounded-lg border shadow-2xs"
                 style={{
-                  backgroundColor: `${vlanColor}14`,
-                  borderColor: `${vlanColor}35`,
-                  color: vlanColor,
+                  backgroundColor: `${hasSwitch && hasVlan ? vlanColor : '#2563eb'}14`,
+                  borderColor: `${hasSwitch && hasVlan ? vlanColor : '#2563eb'}35`,
+                  color: hasSwitch && hasVlan ? vlanColor : '#2563eb',
                 }}
               >
                 <Cable className="w-5 h-5" />
               </div>
               <div>
                 <h3 className="font-mono font-bold text-sm sm:text-base text-slate-900 leading-tight">
-                  Asociar Servicio al Enlace Cross-Connect
+                  {hasSwitch ? 'Asociar Servicio al Enlace Cross-Connect' : 'Registrar Dispositivo en Patch Panel'}
                 </h3>
                 <p className="text-[11px] text-slate-500 font-sans mt-0.5">
-                  Interconexión física entre bastidor y patch cord
+                  {hasSwitch ? 'Interconexión física entre bastidor y patch cord' : 'Asociación directa a puerto de parcheo'}
                 </p>
               </div>
             </div>
@@ -549,23 +563,39 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
 
           {/* Preview del enlace en franja */}
           <div className="bg-white border border-slate-200/90 rounded-xl p-2.5 sm:p-3 shadow-2xs flex items-center justify-between gap-2 font-mono text-xs">
-            {/* Extremo Patch Panel */}
-            <div className="flex items-center gap-2 min-w-0">
-              <div className="p-1.5 rounded bg-slate-100 text-slate-700 border border-slate-200 shrink-0">
-                <Layers className="w-4 h-4 text-slate-600" />
+            {/* Extremo Patch Panel o Puerto Local */}
+            {puerto_patch > 0 ? (
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="p-1.5 rounded bg-slate-100 text-slate-700 border border-slate-200 shrink-0">
+                  <Layers className="w-4 h-4 text-slate-600" />
+                </div>
+                <div className="truncate">
+                  <span className="text-[10px] text-slate-400 block uppercase tracking-wider font-semibold">
+                    Patch Panel
+                  </span>
+                  <span className="font-bold text-slate-900">
+                    {codigo_patch}
+                  </span>
+                  <span className="ml-1.5 px-1.5 py-0.2 rounded bg-slate-100 text-slate-800 border border-slate-300 font-bold text-[11px]">
+                    P{String(puerto_patch).padStart(2, '0')}
+                  </span>
+                </div>
               </div>
-              <div className="truncate">
-                <span className="text-[10px] text-slate-400 block uppercase tracking-wider font-semibold">
-                  Patch Panel
-                </span>
-                <span className="font-bold text-slate-900">
-                  {codigo_patch}
-                </span>
-                <span className="ml-1.5 px-1.5 py-0.2 rounded bg-slate-100 text-slate-800 border border-slate-300 font-bold text-[11px]">
-                  P{String(puerto_patch).padStart(2, '0')}
-                </span>
+            ) : (
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="p-1.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 shrink-0">
+                  <Tag className="w-4 h-4 text-emerald-600" />
+                </div>
+                <div className="truncate">
+                  <span className="text-[10px] text-slate-400 block uppercase tracking-wider font-semibold">
+                    Conexión Directa
+                  </span>
+                  <span className="font-bold text-slate-700">
+                    Puerto de Switch
+                  </span>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Conexión Bidireccional */}
             <div className="flex flex-col items-center px-2 shrink-0 text-slate-400">
@@ -573,35 +603,51 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
               <span className="text-[9px] font-sans font-semibold text-slate-400">Cat6</span>
             </div>
 
-            {/* Extremo Switch */}
-            <div className="flex items-center gap-2 justify-end text-right min-w-0">
-              <div className="truncate">
-                <span className="text-[10px] text-slate-400 block uppercase tracking-wider font-semibold">
-                  Switch
-                </span>
-                <span className="font-bold text-slate-900">
-                  {codigo_switch}
-                </span>
-                <span className="ml-1.5 px-1.5 py-0.2 rounded bg-blue-50 text-blue-800 border border-blue-200 font-bold text-[11px]">
-                  P{String(puerto_switch).padStart(2, '0')}
-                </span>
-                {poeStatus === true && (
-                  <span 
-                    className="ml-1 px-1.5 py-0.2 rounded bg-amber-100 text-amber-900 border border-amber-300 font-bold text-[11px] inline-flex items-center gap-0.5" 
-                    title="Entrega alimentación PoE"
-                  >
-                    ⚡ PoE
+            {/* Extremo Switch o Dispositivo */}
+            {hasSwitch && puerto_switch > 0 ? (
+              <div className="flex items-center gap-2 justify-end text-right min-w-0">
+                <div className="truncate">
+                  <span className="text-[10px] text-slate-400 block uppercase tracking-wider font-semibold">
+                    Switch
                   </span>
-                )}
+                  <span className="font-bold text-slate-900">
+                    {codigo_switch}
+                  </span>
+                  <span className="ml-1.5 px-1.5 py-0.2 rounded bg-blue-50 text-blue-800 border border-blue-200 font-bold text-[11px]">
+                    P{String(puerto_switch).padStart(2, '0')}
+                  </span>
+                  {poeStatus === true && (
+                    <span 
+                      className="ml-1 px-1.5 py-0.2 rounded bg-amber-100 text-amber-900 border border-amber-300 font-bold text-[11px] inline-flex items-center gap-0.5" 
+                      title="Entrega alimentación PoE"
+                    >
+                      ⚡ PoE
+                    </span>
+                  )}
+                </div>
+                <div className="p-1.5 rounded bg-blue-50 text-blue-700 border border-blue-200 shrink-0">
+                  <Cpu className="w-4 h-4 text-blue-600" />
+                </div>
               </div>
-              <div className="p-1.5 rounded bg-blue-50 text-blue-700 border border-blue-200 shrink-0">
-                <Cpu className="w-4 h-4 text-blue-600" />
+            ) : (
+              <div className="flex items-center gap-2 justify-end text-right min-w-0">
+                <div className="truncate">
+                  <span className="text-[10px] text-slate-400 block uppercase tracking-wider font-semibold">
+                    Destino
+                  </span>
+                  <span className="font-bold text-slate-700">
+                    Dispositivo en Terreno
+                  </span>
+                </div>
+                <div className="p-1.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 shrink-0">
+                  <Tag className="w-4 h-4 text-emerald-600" />
+                </div>
               </div>
-            </div>
+            )}
           </div>
 
-          {/* Aviso de evaluación PoE (si el tipo es AP WiFi o Cámara) */}
-          {(selectedKind === 'wifi_ap' || selectedKind === 'camara_cctv') && (resolvedPortId || (switchId && puerto_switch)) && (
+          {/* Aviso de evaluación PoE (si el tipo es AP WiFi o Cámara y hay un switch) */}
+          {hasSwitch && (selectedKind === 'wifi_ap' || selectedKind === 'camara_cctv') && (resolvedPortId || (switchId && puerto_switch)) && (
             <PoeEvaluationNotice
               puertoSwitchId={resolvedPortId}
               switchId={switchId}
@@ -618,83 +664,85 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
           {/* ======================================================== */}
           {/* 2) BLOQUE: VLAN DEL PUERTO SWITCH (Solo Lectura)         */}
           {/* ======================================================== */}
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider font-mono">
-                VLAN del Puerto Switch
-              </label>
-              <span className="text-[10px] text-slate-400 font-sans">
-                Solo lectura · Heredado desde Diagrama de Rack
-              </span>
-            </div>
-
-            {hasVlan ? (
-              /* Chip grande con color y uso */
-              <div
-                className="p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs font-mono transition-all"
-                style={{
-                  backgroundColor: `${vlanColor}12`,
-                  borderColor: `${vlanColor}40`,
-                }}
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <span
-                    className="w-3.5 h-3.5 rounded-full shrink-0 shadow-2xs ring-2 ring-white"
-                    style={{ backgroundColor: vlanColor }}
-                  />
-                  <div className="min-w-0">
-                    <div className="font-bold text-slate-900 text-sm truncate">
-                      VLAN {vlan_numero} {vlan_nombre ? `· ${vlan_nombre}` : ''}
-                    </div>
-                    <div className="text-[11px] text-slate-600 font-sans mt-0.5 truncate">
-                      Uso heredado:{' '}
-                      <span className="font-semibold text-slate-800">
-                        {uso_vlan || 'Sin uso especificado'}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <span
-                  className="inline-flex items-center gap-1 text-[10px] uppercase font-bold px-2 py-0.5 rounded border self-start sm:self-auto shrink-0 tracking-wider font-mono"
-                  style={{
-                    color: vlanColor,
-                    borderColor: `${vlanColor}60`,
-                    backgroundColor: `${vlanColor}18`,
-                  }}
-                >
-                  <Tag className="w-3 h-3" />
-                  <span>VLAN {vlan_numero}</span>
+          {hasSwitch && (
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider font-mono">
+                  VLAN del Puerto Switch
+                </label>
+                <span className="text-[10px] text-slate-400 font-sans">
+                  Solo lectura · Heredado desde Diagrama de Rack
                 </span>
               </div>
-            ) : (
-              /* Banner amarillo si no tiene VLAN */
-              <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 space-y-2">
-                <div className="flex items-start gap-2.5">
-                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                  <div className="text-xs text-amber-900 font-sans leading-relaxed">
-                    <span className="font-bold font-mono block mb-0.5 text-amber-950">
-                      Puerto sin VLAN (Transparente)
-                    </span>
-                    Este puerto switch no tiene ninguna VLAN configurada. Este enlace no heredará
-                    uso de red.
-                  </div>
-                </div>
 
-                <label className="flex items-center gap-2 pt-1 border-t border-amber-200/80 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={confirmNoVlan}
-                    onChange={(e) => setConfirmNoVlan(e.target.checked)}
-                    className="rounded border-amber-400 text-amber-600 focus:ring-amber-500 w-3.5 h-3.5 cursor-pointer"
-                  />
-                  <span className="text-[11px] font-bold text-amber-900 font-sans">
-                    Confirmo conectar sin VLAN
+              {hasVlan ? (
+                /* Chip grande con color y uso */
+                <div
+                  className="p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs font-mono transition-all"
+                  style={{
+                    backgroundColor: `${vlanColor}12`,
+                    borderColor: `${vlanColor}40`,
+                  }}
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span
+                      className="w-3.5 h-3.5 rounded-full shrink-0 shadow-2xs ring-2 ring-white"
+                      style={{ backgroundColor: vlanColor }}
+                    />
+                    <div className="min-w-0">
+                      <div className="font-bold text-slate-900 text-sm truncate">
+                        VLAN {vlan_numero} {vlan_nombre ? `· ${vlan_nombre}` : ''}
+                      </div>
+                      <div className="text-[11px] text-slate-600 font-sans mt-0.5 truncate">
+                        Uso heredado:{' '}
+                        <span className="font-semibold text-slate-800">
+                          {uso_vlan || 'Sin uso especificado'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <span
+                    className="inline-flex items-center gap-1 text-[10px] uppercase font-bold px-2 py-0.5 rounded border self-start sm:self-auto shrink-0 tracking-wider font-mono"
+                    style={{
+                      color: vlanColor,
+                      borderColor: `${vlanColor}60`,
+                      backgroundColor: `${vlanColor}18`,
+                    }}
+                  >
+                    <Tag className="w-3 h-3" />
+                    <span>VLAN {vlan_numero}</span>
                   </span>
-                </label>
-              </div>
-            )}
-          </div>
+                </div>
+              ) : (
+                /* Banner amarillo si no tiene VLAN */
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 space-y-2">
+                  <div className="flex items-start gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div className="text-xs text-amber-900 font-sans leading-relaxed">
+                      <span className="font-bold font-mono block mb-0.5 text-amber-950">
+                        Puerto sin VLAN (Transparente)
+                      </span>
+                      Este puerto switch no tiene ninguna VLAN configurada. Este enlace no heredará
+                      uso de red.
+                    </div>
+                  </div>
+
+                  <label className="flex items-center gap-2 pt-1 border-t border-amber-200/80 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={confirmNoVlan}
+                      onChange={(e) => setConfirmNoVlan(e.target.checked)}
+                      className="rounded border-amber-400 text-amber-600 focus:ring-amber-500 w-3.5 h-3.5 cursor-pointer"
+                    />
+                    <span className="text-[11px] font-bold text-amber-900 font-sans">
+                      Confirmo conectar sin VLAN
+                    </span>
+                  </label>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* ======================================================== */}
           {/* 3) BLOQUE: ¿QUÉ HAY AL OTRO EXTREMO? (Grid 3x2)          */}
@@ -1097,8 +1145,8 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
             style={
               isFormValid && !loading
                 ? {
-                    backgroundColor: vlanColor,
-                    boxShadow: `0 4px 14px ${vlanColor}40`,
+                    backgroundColor: hasSwitch && hasVlan ? vlanColor : '#2563eb',
+                    boxShadow: `0 4px 14px ${hasSwitch && hasVlan ? vlanColor : '#2563eb'}40`,
                   }
                 : undefined
             }
@@ -1106,12 +1154,12 @@ export const AsociarServicioDialog: React.FC<AsociarServicioDialogProps> = ({
             <CheckCircle2 className="w-4 h-4" />
             <span>
               {loading
-                ? 'Conectando...'
+                ? 'Guardando...'
                 : selectedKind === 'solo_cable'
                 ? 'Fijar Enlace Físico'
                 : activeTab === 'existente'
-                ? 'Asociar Punto y Conectar'
-                : 'Crear Punto y Conectar Enlace'}
+                ? (hasSwitch ? 'Asociar Punto y Conectar' : 'Asociar Dispositivo')
+                : (hasSwitch ? 'Crear Punto y Conectar Enlace' : 'Registrar Dispositivo')}
             </span>
           </button>
         </div>

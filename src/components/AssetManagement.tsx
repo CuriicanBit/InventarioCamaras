@@ -240,7 +240,7 @@ export const AssetManagement: React.FC<AssetManagementProps> = ({
       const puntosIds = selectedItems.filter(i => i.origen === 'punto_red').map(i => i.id);
       const equiposIds = selectedItems.filter(i => i.origen === 'equipo').map(i => i.id);
 
-      const updates: Promise<any>[] = [];
+      const updates: PromiseLike<any>[] = [];
       if (camarasIds.length > 0) {
         updates.push(supabase.from('camaras').update({ estado_ciclo_vida: targetState }).in('id', camarasIds));
       }

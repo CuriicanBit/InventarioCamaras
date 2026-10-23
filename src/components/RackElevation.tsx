@@ -126,6 +126,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
   const [isEditing, setIsEditing] = useState(false);
   const [formAlturaU, setFormAlturaU] = useState<number | ''>(1);
   const [modoAvanzadoU, setModoAvanzadoU] = useState<boolean>(false);
+  const [overriddenFields, setOverriddenFields] = useState<Record<string, boolean>>({});
   const [formData, setFormData] = useState<{
     id?: string;
     rack_id: string;
@@ -601,6 +602,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
   const handleOpenAddModal = (options?: { isNonRackeable?: boolean; tipo?: TipoEquipo }) => {
     setIsEditing(false);
     setModoAvanzadoU(false);
+    setOverriddenFields({});
     const isNonRackeable = Boolean(options?.isNonRackeable);
     const tipo = options?.tipo || (isNonRackeable ? 'ups' : 'switch');
     const initialHeight = isNonRackeable ? 0 : 1;
@@ -651,6 +653,51 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     const uEnd = isNonRack ? 0 : (eq.posicion_u_fin || uStart);
     const currentHeight = isNonRack ? 0 : (uEnd - uStart + 1);
     setFormAlturaU(currentHeight || 1);
+
+    // Detect if values differ from catalog model (mark as overridden if so)
+    const initialOverrides: Record<string, boolean> = {};
+    if (matchedModel) {
+      const inferredH = inferUHeight(matchedModel.nombre, eq.tipo);
+      if (currentHeight > 0 && currentHeight !== inferredH) {
+        initialOverrides['altura_u'] = true;
+      }
+      if (matchedModel.puertos_default !== null && matchedModel.puertos_default !== undefined) {
+        if (eq.puertos_totales !== matchedModel.puertos_default) {
+          initialOverrides['puertos_totales'] = true;
+        }
+      }
+      if (matchedModel.puertos_sfp_default !== null && matchedModel.puertos_sfp_default !== undefined) {
+        if (eq.puertos_sfp_totales !== matchedModel.puertos_sfp_default) {
+          initialOverrides['puertos_sfp_totales'] = true;
+        }
+      }
+      if (matchedModel.poe_puertos_default) {
+        if ((eq.poe_puertos || '') !== matchedModel.poe_puertos_default) {
+          initialOverrides['poe_puertos'] = true;
+        }
+      }
+      if (matchedModel.poe_estandar_default) {
+        if ((eq.poe_estandar || '') !== matchedModel.poe_estandar_default) {
+          initialOverrides['poe_estandar'] = true;
+        }
+      }
+      if (matchedModel.poe_presupuesto_w_default !== null && matchedModel.poe_presupuesto_w_default !== undefined) {
+        if (eq.poe_presupuesto_w !== matchedModel.poe_presupuesto_w_default) {
+          initialOverrides['poe_presupuesto_w'] = true;
+        }
+      }
+      if (matchedModel.canales_default !== null && matchedModel.canales_default !== undefined) {
+        if (eq.canales_totales !== matchedModel.canales_default) {
+          initialOverrides['canales_totales'] = true;
+        }
+      }
+      if (matchedModel.capacidad_va_default !== null && matchedModel.capacidad_va_default !== undefined) {
+        if (eq.capacidad_va !== matchedModel.capacidad_va_default) {
+          initialOverrides['capacidad_va'] = true;
+        }
+      }
+    }
+    setOverriddenFields(initialOverrides);
 
     setFormData({
       id: eq.id,
@@ -709,6 +756,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
 
   // When changing equipment type: clean hidden fields and update inferred U height
   const handleTipoChange = (newTipo: TipoEquipo) => {
+    setOverriddenFields({});
     const newHeight = inferUHeight(formData.modelo, newTipo);
     setFormAlturaU(newHeight);
     const currentUSuperior = Number(formData.posicion_u_fin || totalU);
@@ -726,6 +774,10 @@ export const RackElevation: React.FC<RackElevationProps> = ({
       posicion_u_inicio: willBeRackeable ? (prev.posicion_u_inicio && prev.posicion_u_inicio > 0 ? prev.posicion_u_inicio : newUInferior) : 0,
       posicion_u_fin: willBeRackeable ? (prev.posicion_u_fin && prev.posicion_u_fin > 0 ? prev.posicion_u_fin : validUSup) : 0,
       puertos_totales: '',
+      puertos_sfp_totales: '',
+      poe_puertos: '',
+      poe_estandar: '',
+      poe_presupuesto_w: '',
       canales_totales: '',
       capacidad_va: newTipo === 'ups' ? '1500' : '',
       ip_gestion: '',
@@ -733,26 +785,204 @@ export const RackElevation: React.FC<RackElevationProps> = ({
     }));
   };
 
-  // When selecting a model: autocomplete defaults & infer U height
+  // When selecting a model: autocomplete defaults, lock inherited specs & infer U height
   const handleModeloChange = (modeloId: string, modeloName: string, defaults?: Partial<Modelo>) => {
-    const newHeight = inferUHeight(modeloName, formData.tipo);
-    setFormAlturaU(newHeight);
+    if (!modeloId && !modeloName) {
+      setOverriddenFields({});
+      setFormData(prev => ({
+        ...prev,
+        modelo_id: null,
+        modelo: null,
+      }));
+      return;
+    }
+
+    const fullModel = defaults || modelos.find(m => m.id === modeloId) || (modeloName ? modelos.find(m => m.nombre === modeloName) : undefined);
+
+    // Reset overrides so all available default properties from the new model are inherited & locked
+    setOverriddenFields({});
+
+    const isNonRackeable = formData.tipo === 'ups' && formData.es_rackeable === false;
+    const newHeight = isNonRackeable ? 0 : inferUHeight(modeloName, formData.tipo);
+    setFormAlturaU(newHeight || 1);
     const currentUSuperior = Number(formData.posicion_u_fin || totalU);
-    const newUInferior = calculateUInferior(currentUSuperior, newHeight);
+    const newUInferior = isNonRackeable ? 0 : calculateUInferior(currentUSuperior, newHeight || 1);
 
     setFormData(prev => ({
       ...prev,
       modelo_id: modeloId || null,
       modelo: modeloName || null,
-      posicion_u_inicio: newUInferior,
-      puertos_totales: defaults?.puertos_default !== null && defaults?.puertos_default !== undefined ? String(defaults.puertos_default) : prev.puertos_totales,
-      puertos_sfp_totales: defaults?.puertos_sfp_default !== null && defaults?.puertos_sfp_default !== undefined ? String(defaults.puertos_sfp_default) : prev.puertos_sfp_totales,
-      poe_puertos: defaults?.poe_puertos_default !== undefined && defaults?.poe_puertos_default !== null ? String(defaults.poe_puertos_default) : prev.poe_puertos,
-      poe_estandar: defaults?.poe_estandar_default !== undefined && defaults?.poe_estandar_default !== null ? String(defaults.poe_estandar_default) : prev.poe_estandar,
-      poe_presupuesto_w: defaults?.poe_presupuesto_w_default !== undefined && defaults?.poe_presupuesto_w_default !== null ? String(defaults.poe_presupuesto_w_default) : prev.poe_presupuesto_w,
-      canales_totales: defaults?.canales_default ? String(defaults.canales_default) : prev.canales_totales,
-      capacidad_va: defaults?.capacidad_va_default ? String(defaults.capacidad_va_default) : prev.capacidad_va,
+      posicion_u_inicio: isNonRackeable ? 0 : newUInferior,
+      puertos_totales: fullModel?.puertos_default !== null && fullModel?.puertos_default !== undefined 
+        ? String(fullModel.puertos_default) 
+        : '',
+      puertos_sfp_totales: fullModel?.puertos_sfp_default !== null && fullModel?.puertos_sfp_default !== undefined 
+        ? String(fullModel.puertos_sfp_default) 
+        : '',
+      poe_puertos: fullModel?.poe_puertos_default !== undefined && fullModel?.poe_puertos_default !== null 
+        ? String(fullModel.poe_puertos_default) 
+        : '',
+      poe_estandar: fullModel?.poe_estandar_default !== undefined && fullModel?.poe_estandar_default !== null 
+        ? String(fullModel.poe_estandar_default) 
+        : '',
+      poe_presupuesto_w: fullModel?.poe_presupuesto_w_default !== undefined && fullModel?.poe_presupuesto_w_default !== null 
+        ? String(fullModel.poe_presupuesto_w_default) 
+        : '',
+      canales_totales: fullModel?.canales_default !== null && fullModel?.canales_default !== undefined 
+        ? String(fullModel.canales_default) 
+        : '',
+      capacidad_va: fullModel?.capacidad_va_default !== null && fullModel?.capacidad_va_default !== undefined 
+        ? String(fullModel.capacidad_va_default) 
+        : (prev.tipo === 'ups' ? (prev.capacidad_va || '1500') : prev.capacidad_va),
     }));
+  };
+
+  // Model object currently matching formData.modelo_id or formData.modelo
+  const selectedModelObj = useMemo(() => {
+    if (!formData.modelo_id && !formData.modelo) return null;
+    return modelos.find(m => m.id === formData.modelo_id || m.nombre === formData.modelo) || null;
+  }, [formData.modelo_id, formData.modelo, modelos]);
+
+  // Check if a specific field is inherited from the catalog model and currently locked
+  const isFieldInheritedAndLocked = (fieldName: string): boolean => {
+    if (!selectedModelObj) return false;
+    if (overriddenFields[fieldName]) return false;
+
+    switch (fieldName) {
+      case 'altura_u':
+        return formData.es_rackeable !== false && Boolean(selectedModelObj.nombre);
+      case 'puertos_totales':
+        return selectedModelObj.puertos_default !== null && selectedModelObj.puertos_default !== undefined;
+      case 'puertos_sfp_totales':
+        return selectedModelObj.puertos_sfp_default !== null && selectedModelObj.puertos_sfp_default !== undefined;
+      case 'poe_puertos':
+        return Boolean(selectedModelObj.poe_puertos_default);
+      case 'poe_estandar':
+        return Boolean(selectedModelObj.poe_estandar_default);
+      case 'poe_presupuesto_w':
+        return selectedModelObj.poe_presupuesto_w_default !== null && selectedModelObj.poe_presupuesto_w_default !== undefined;
+      case 'canales_totales':
+        return selectedModelObj.canales_default !== null && selectedModelObj.canales_default !== undefined;
+      case 'capacidad_va':
+        return selectedModelObj.capacidad_va_default !== null && selectedModelObj.capacidad_va_default !== undefined;
+      default:
+        return false;
+    }
+  };
+
+  const handleOverrideField = (fieldName: string) => {
+    setOverriddenFields(prev => ({ ...prev, [fieldName]: true }));
+  };
+
+  const handleRestoreField = (fieldName: string) => {
+    setOverriddenFields(prev => {
+      const next = { ...prev };
+      delete next[fieldName];
+      return next;
+    });
+
+    if (!selectedModelObj) return;
+
+    switch (fieldName) {
+      case 'altura_u': {
+        const isNonRackeable = formData.tipo === 'ups' && formData.es_rackeable === false;
+        const newHeight = isNonRackeable ? 0 : inferUHeight(selectedModelObj.nombre, formData.tipo);
+        setFormAlturaU(newHeight || 1);
+        const currentUSuperior = Number(formData.posicion_u_fin || totalU);
+        const newUInferior = isNonRackeable ? 0 : calculateUInferior(currentUSuperior, newHeight || 1);
+        setFormData(prev => ({ ...prev, posicion_u_inicio: isNonRackeable ? 0 : newUInferior }));
+        break;
+      }
+      case 'puertos_totales':
+        if (selectedModelObj.puertos_default !== null && selectedModelObj.puertos_default !== undefined) {
+          setFormData(prev => ({ ...prev, puertos_totales: String(selectedModelObj.puertos_default) }));
+        }
+        break;
+      case 'puertos_sfp_totales':
+        if (selectedModelObj.puertos_sfp_default !== null && selectedModelObj.puertos_sfp_default !== undefined) {
+          setFormData(prev => ({ ...prev, puertos_sfp_totales: String(selectedModelObj.puertos_sfp_default) }));
+        }
+        break;
+      case 'poe_puertos':
+        if (selectedModelObj.poe_puertos_default !== null && selectedModelObj.poe_puertos_default !== undefined) {
+          setFormData(prev => ({ ...prev, poe_puertos: String(selectedModelObj.poe_puertos_default) }));
+        }
+        break;
+      case 'poe_estandar':
+        if (selectedModelObj.poe_estandar_default !== null && selectedModelObj.poe_estandar_default !== undefined) {
+          setFormData(prev => ({ ...prev, poe_estandar: String(selectedModelObj.poe_estandar_default) }));
+        }
+        break;
+      case 'poe_presupuesto_w':
+        if (selectedModelObj.poe_presupuesto_w_default !== null && selectedModelObj.poe_presupuesto_w_default !== undefined) {
+          setFormData(prev => ({ ...prev, poe_presupuesto_w: String(selectedModelObj.poe_presupuesto_w_default) }));
+        }
+        break;
+      case 'canales_totales':
+        if (selectedModelObj.canales_default !== null && selectedModelObj.canales_default !== undefined) {
+          setFormData(prev => ({ ...prev, canales_totales: String(selectedModelObj.canales_default) }));
+        }
+        break;
+      case 'capacidad_va':
+        if (selectedModelObj.capacidad_va_default !== null && selectedModelObj.capacidad_va_default !== undefined) {
+          setFormData(prev => ({ ...prev, capacidad_va: String(selectedModelObj.capacidad_va_default) }));
+        }
+        break;
+    }
+  };
+
+  const renderInheritanceBadge = (fieldName: string) => {
+    if (!selectedModelObj) return null;
+    const isLocked = isFieldInheritedAndLocked(fieldName);
+    const modelHasValue = (() => {
+      switch (fieldName) {
+        case 'altura_u': return formData.es_rackeable !== false && Boolean(selectedModelObj.nombre);
+        case 'puertos_totales': return selectedModelObj.puertos_default !== null && selectedModelObj.puertos_default !== undefined;
+        case 'puertos_sfp_totales': return selectedModelObj.puertos_sfp_default !== null && selectedModelObj.puertos_sfp_default !== undefined;
+        case 'poe_puertos': return Boolean(selectedModelObj.poe_puertos_default);
+        case 'poe_estandar': return Boolean(selectedModelObj.poe_estandar_default);
+        case 'poe_presupuesto_w': return selectedModelObj.poe_presupuesto_w_default !== null && selectedModelObj.poe_presupuesto_w_default !== undefined;
+        case 'canales_totales': return selectedModelObj.canales_default !== null && selectedModelObj.canales_default !== undefined;
+        case 'capacidad_va': return selectedModelObj.capacidad_va_default !== null && selectedModelObj.capacidad_va_default !== undefined;
+        default: return false;
+      }
+    })();
+
+    if (!modelHasValue) return null;
+
+    if (isLocked) {
+      return (
+        <span className="inline-flex items-center gap-1.5 text-[10px] shrink-0 font-normal">
+          <span className="text-blue-700 bg-blue-50 border border-blue-200/80 px-1.5 py-0.5 rounded font-mono">
+            Heredado del modelo: <strong className="font-semibold">{selectedModelObj.nombre}</strong>
+          </span>
+          <button
+            type="button"
+            onClick={() => handleOverrideField(fieldName)}
+            className="text-blue-600 hover:text-blue-800 font-semibold underline cursor-pointer hover:bg-blue-50 px-1 py-0.5 rounded transition-colors"
+            title="Modificar manualmente este valor"
+          >
+            Sobrescribir
+          </button>
+        </span>
+      );
+    }
+
+    return (
+      <span className="inline-flex items-center gap-1.5 text-[10px] shrink-0 font-normal">
+        <span className="text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded font-mono">
+          Sobrescrito manualmente
+        </span>
+        <button
+          type="button"
+          onClick={() => handleRestoreField(fieldName)}
+          className="text-slate-500 hover:text-slate-800 underline cursor-pointer hover:bg-slate-100 px-1 py-0.5 rounded transition-colors"
+          title="Restaurar especificación del modelo"
+        >
+          Restaurar del modelo
+        </button>
+      </span>
+    );
   };
 
   // Submit Add/Edit form to Supabase
@@ -1988,7 +2218,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                       <Archive className="w-4 h-4" />
                     </button>
                     <button
-                      onClick={() => handleDeleteEquipo(selectedEquipo.id)}
+                      onClick={() => setDeleteConfirmModalOpen(true)} // <-- CAMBIA ESTO
                       className="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded"
                       title="Eliminar permanentemente"
                     >
@@ -2572,6 +2802,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                         modelo_id: null,
                         modelo: null
                       });
+                      setOverriddenFields({});
                     }}
                   />
                 </div>
@@ -2678,19 +2909,18 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         {/* Selector de Altura (U) */}
                         <div>
-                          <div className="flex items-center justify-between mb-1">
+                          <div className="flex items-center justify-between mb-1 gap-1 flex-wrap">
                             <label className="text-[11px] text-slate-700 font-semibold">
                               Altura (Unidades U) *
                             </label>
-                            <span className="text-[10px] text-slate-500 font-sans">
-                              Sugerida por modelo/tipo
-                            </span>
+                            {renderInheritanceBadge('altura_u')}
                           </div>
                           <div className="flex items-center gap-1">
                             {[1, 2, 3, 4].map(u => (
                               <button
                                 key={u}
                                 type="button"
+                                disabled={isFieldInheritedAndLocked('altura_u')}
                                 onClick={() => {
                                   const uSup = Number(formData.posicion_u_fin || totalU);
                                   const uInf = calculateUInferior(uSup, u);
@@ -2704,6 +2934,8 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                                 className={`flex-1 py-1 text-xs font-bold rounded border transition-colors ${
                                   formAlturaU === u
                                     ? 'bg-blue-600 text-white border-blue-600'
+                                    : isFieldInheritedAndLocked('altura_u')
+                                    ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed opacity-60'
                                     : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
                                 }`}
                               >
@@ -2714,6 +2946,7 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                               type="number"
                               min="1"
                               max="12"
+                              disabled={isFieldInheritedAndLocked('altura_u')}
                               value={formAlturaU}
                               onChange={(e) => {
                                 const val = e.target.value;
@@ -2731,8 +2964,12 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                                   }));
                                 }
                               }}
-                              className="w-12 px-1.5 py-1 text-xs border border-slate-300 rounded text-center font-bold bg-white"
-                              title="Altura manual en U"
+                              className={`w-12 px-1.5 py-1 text-xs border rounded text-center font-bold ${
+                                isFieldInheritedAndLocked('altura_u')
+                                  ? 'bg-slate-100 text-slate-500 border-slate-200 cursor-not-allowed'
+                                  : 'bg-white text-slate-800 border-slate-300'
+                              }`}
+                              title={isFieldInheritedAndLocked('altura_u') ? "Altura heredada del modelo. Haz clic en 'Sobrescribir' para modificar." : "Altura manual en U"}
                             />
                           </div>
                         </div>
@@ -2940,126 +3177,162 @@ export const RackElevation: React.FC<RackElevationProps> = ({
 
                   {formData.tipo === 'patch_panel' && (
                     <div>
-                      <label className="block text-[11px] text-slate-700 font-semibold mb-1">
-                        Puertos Totales *
-                      </label>
+                      <div className="flex items-center justify-between mb-1 gap-1 flex-wrap">
+                        <label className="block text-[11px] text-slate-700 font-semibold">
+                          Puertos Totales *
+                        </label>
+                        {renderInheritanceBadge('puertos_totales')}
+                      </div>
                       <input
                         type="number"
                         required
                         min="1"
                         max="96"
+                        readOnly={isFieldInheritedAndLocked('puertos_totales')}
                         value={formData.puertos_totales}
                         onChange={(e) => setFormData({ ...formData, puertos_totales: e.target.value })}
                         placeholder="ej. 24 o 48"
-                        className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white font-mono focus:ring-1 focus:ring-blue-600 text-xs font-bold"
+                        className={`w-full px-3 py-1.5 border rounded font-mono focus:ring-1 focus:ring-blue-600 text-xs font-bold ${
+                          isFieldInheritedAndLocked('puertos_totales')
+                            ? 'bg-slate-100 text-slate-600 border-slate-300 cursor-not-allowed'
+                            : 'bg-white text-slate-800 border-slate-300'
+                        }`}
                       />
                     </div>
                   )}
 
                   {formData.tipo === 'switch' && (
                     <div className="space-y-3">
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <div>
-                          <label className="block text-[11px] text-slate-700 font-semibold mb-1">
-                            Puertos RJ45 *
-                          </label>
+                          <div className="flex items-center justify-between mb-1 gap-1 flex-wrap">
+                            <label className="block text-[11px] text-slate-700 font-semibold">
+                              Puertos RJ45 *
+                            </label>
+                            {renderInheritanceBadge('puertos_totales')}
+                          </div>
                           <input
                             type="number"
                             required
                             min="0"
                             max="96"
+                            readOnly={isFieldInheritedAndLocked('puertos_totales')}
                             value={formData.puertos_totales}
                             onChange={(e) => {
                               setFormData({ ...formData, puertos_totales: e.target.value });
                               setPortsInUseError(null);
                             }}
                             placeholder="ej. 24 (o 0)"
-                            className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white font-mono focus:ring-1 focus:ring-blue-600 text-xs font-bold"
+                            className={`w-full px-3 py-1.5 border rounded font-mono focus:ring-1 focus:ring-blue-600 text-xs font-bold ${
+                              isFieldInheritedAndLocked('puertos_totales')
+                                ? 'bg-slate-100 text-slate-600 border-slate-300 cursor-not-allowed'
+                                : 'bg-white text-slate-800 border-slate-300'
+                            }`}
                           />
                         </div>
                         <div>
-                          <label className="block text-[11px] text-slate-700 font-semibold mb-1">
-                            Puertos SFP
-                          </label>
+                          <div className="flex items-center justify-between mb-1 gap-1 flex-wrap">
+                            <label className="block text-[11px] text-slate-700 font-semibold">
+                              Puertos SFP
+                            </label>
+                            {renderInheritanceBadge('puertos_sfp_totales')}
+                          </div>
                           <input
                             type="number"
                             min="0"
                             max="48"
+                            readOnly={isFieldInheritedAndLocked('puertos_sfp_totales')}
                             value={formData.puertos_sfp_totales}
                             onChange={(e) => {
                               setFormData({ ...formData, puertos_sfp_totales: e.target.value });
                               setPortsInUseError(null);
                             }}
                             placeholder="ej. 4 (o 0)"
-                            className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white font-mono focus:ring-1 focus:ring-blue-600 text-xs font-bold"
+                            className={`w-full px-3 py-1.5 border rounded font-mono focus:ring-1 focus:ring-blue-600 text-xs font-bold ${
+                              isFieldInheritedAndLocked('puertos_sfp_totales')
+                                ? 'bg-slate-100 text-slate-600 border-slate-300 cursor-not-allowed'
+                                : 'bg-white text-slate-800 border-slate-300'
+                            }`}
                           />
                         </div>
                       </div>
 
                       {/* Campo Puertos PoE */}
                       <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
-                        <div className="flex items-center justify-between">
+                        <div className="flex items-center justify-between gap-1 flex-wrap">
                           <label className="block text-[11px] font-bold text-slate-700 flex items-center gap-1.5">
                             <Zap className="w-3.5 h-3.5 text-amber-600" />
                             <span>Puertos PoE</span>
                           </label>
-                          {/* Resumen "PoE: N de M puertos" */}
-                          {(() => {
-                            const totalRj45 = parseInt(formData.puertos_totales, 10) || 0;
-                            const poeInfo = parsePoePorts(formData.poe_puertos, totalRj45);
-                            return (
-                              <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold border ${
-                                poeInfo.isDefined
-                                  ? 'bg-amber-100 text-amber-900 border-amber-300'
-                                  : 'bg-white text-slate-500 border-slate-200 italic'
-                              }`}>
-                                {poeInfo.isDefined ? '⚡ ' : ''}{poeInfo.summaryText}
-                              </span>
-                            );
-                          })()}
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {renderInheritanceBadge('poe_puertos')}
+                            {/* Resumen "PoE: N de M puertos" */}
+                            {(() => {
+                              const totalRj45 = parseInt(formData.puertos_totales, 10) || 0;
+                              const poeInfo = parsePoePorts(formData.poe_puertos, totalRj45);
+                              return (
+                                <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold border ${
+                                  poeInfo.isDefined
+                                    ? 'bg-amber-100 text-amber-900 border-amber-300'
+                                    : 'bg-white text-slate-500 border-slate-200 italic'
+                                }`}>
+                                  {poeInfo.isDefined ? '⚡ ' : ''}{poeInfo.summaryText}
+                                </span>
+                              );
+                            })()}
+                          </div>
                         </div>
 
                         {/* Selector rápido [Todos | Ninguno | Rangos] */}
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <button
                             type="button"
+                            disabled={isFieldInheritedAndLocked('poe_puertos')}
                             onClick={() => setFormData({ ...formData, poe_puertos: 'todos' })}
-                            className={`px-2.5 py-1 text-[11px] font-bold rounded border transition-colors cursor-pointer ${
-                              formData.poe_puertos.trim().toLowerCase() === 'todos'
-                                ? 'bg-amber-600 text-white border-amber-600 shadow-2xs'
-                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                            className={`px-2.5 py-1 text-[11px] font-bold rounded border transition-colors ${
+                              isFieldInheritedAndLocked('poe_puertos')
+                                ? 'opacity-60 cursor-not-allowed ' + (formData.poe_puertos.trim().toLowerCase() === 'todos' ? 'bg-amber-600 text-white border-amber-600' : 'bg-white text-slate-400 border-slate-200')
+                                : formData.poe_puertos.trim().toLowerCase() === 'todos'
+                                ? 'bg-amber-600 text-white border-amber-600 shadow-2xs cursor-pointer'
+                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100 cursor-pointer'
                             }`}
                           >
                             Todos
                           </button>
                           <button
                             type="button"
+                            disabled={isFieldInheritedAndLocked('poe_puertos')}
                             onClick={() => setFormData({ ...formData, poe_puertos: 'ninguno' })}
-                            className={`px-2.5 py-1 text-[11px] font-bold rounded border transition-colors cursor-pointer ${
-                              formData.poe_puertos.trim().toLowerCase() === 'ninguno'
-                                ? 'bg-slate-700 text-white border-slate-700 shadow-2xs'
-                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                            className={`px-2.5 py-1 text-[11px] font-bold rounded border transition-colors ${
+                              isFieldInheritedAndLocked('poe_puertos')
+                                ? 'opacity-60 cursor-not-allowed ' + (formData.poe_puertos.trim().toLowerCase() === 'ninguno' ? 'bg-slate-700 text-white border-slate-700' : 'bg-white text-slate-400 border-slate-200')
+                                : formData.poe_puertos.trim().toLowerCase() === 'ninguno'
+                                ? 'bg-slate-700 text-white border-slate-700 shadow-2xs cursor-pointer'
+                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100 cursor-pointer'
                             }`}
                           >
                             Ninguno
                           </button>
                           <button
                             type="button"
+                            disabled={isFieldInheritedAndLocked('poe_puertos')}
                             onClick={() => {
                               const cur = formData.poe_puertos.trim().toLowerCase();
                               if (cur === 'todos' || cur === 'ninguno' || cur === '') {
                                 setFormData({ ...formData, poe_puertos: '1-8,17-24' });
                               }
                             }}
-                            className={`px-2.5 py-1 text-[11px] font-bold rounded border transition-colors cursor-pointer ${
-                              getPoeSelectorMode(formData.poe_puertos) === 'rangos'
-                                ? 'bg-blue-600 text-white border-blue-600 shadow-2xs'
-                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                            className={`px-2.5 py-1 text-[11px] font-bold rounded border transition-colors ${
+                              isFieldInheritedAndLocked('poe_puertos')
+                                ? 'opacity-60 cursor-not-allowed ' + (getPoeSelectorMode(formData.poe_puertos) === 'rangos' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-400 border-slate-200')
+                                : getPoeSelectorMode(formData.poe_puertos) === 'rangos'
+                                ? 'bg-blue-600 text-white border-blue-600 shadow-2xs cursor-pointer'
+                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100 cursor-pointer'
                             }`}
                           >
                             Rangos
                           </button>
-                          {formData.poe_puertos && (
+                          {formData.poe_puertos && !isFieldInheritedAndLocked('poe_puertos') && (
                             <button
                               type="button"
                               onClick={() => setFormData({ ...formData, poe_puertos: '' })}
@@ -3076,10 +3349,15 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                           <div className="space-y-1 pt-1">
                             <input
                               type="text"
+                              readOnly={isFieldInheritedAndLocked('poe_puertos')}
                               value={formData.poe_puertos}
                               onChange={(e) => setFormData({ ...formData, poe_puertos: e.target.value })}
                               placeholder="1-8,17-24"
-                              className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs bg-white font-mono"
+                              className={`w-full px-3 py-1.5 border rounded text-xs font-mono ${
+                                isFieldInheritedAndLocked('poe_puertos')
+                                  ? 'bg-slate-100 text-slate-600 border-slate-300 cursor-not-allowed'
+                                  : 'bg-white text-slate-800 border-slate-300'
+                              }`}
                             />
                             <p className="text-[10px] text-slate-500 font-sans">
                               Especifique puertos o rangos separados por coma (ejemplo: <strong>1-8,17-24</strong> o <strong>1, 3-5</strong>).
@@ -3103,15 +3381,23 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                         })()}
 
                         {/* Campos Estándar PoE y Presupuesto PoE (W) */}
-                        <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-200">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-200">
                           <div>
-                            <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                              Estándar PoE
-                            </label>
+                            <div className="flex items-center justify-between mb-1 gap-1 flex-wrap">
+                              <label className="block text-[11px] font-bold text-slate-700">
+                                Estándar PoE
+                              </label>
+                              {renderInheritanceBadge('poe_estandar')}
+                            </div>
                             <select
+                              disabled={isFieldInheritedAndLocked('poe_estandar')}
                               value={formData.poe_estandar}
                               onChange={(e) => setFormData({ ...formData, poe_estandar: e.target.value })}
-                              className="w-full px-2 py-1.5 border border-slate-300 rounded text-xs bg-white"
+                              className={`w-full px-2 py-1.5 border rounded text-xs ${
+                                isFieldInheritedAndLocked('poe_estandar')
+                                  ? 'bg-slate-100 text-slate-600 border-slate-300 cursor-not-allowed'
+                                  : 'bg-white text-slate-800 border-slate-300'
+                              }`}
                             >
                               <option value="">Sin especificar...</option>
                               {POE_ESTANDAR_OPTIONS.map(opt => (
@@ -3120,17 +3406,25 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                             </select>
                           </div>
                           <div>
-                            <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                              Presupuesto PoE (W)
-                            </label>
+                            <div className="flex items-center justify-between mb-1 gap-1 flex-wrap">
+                              <label className="block text-[11px] font-bold text-slate-700">
+                                Presupuesto PoE (W)
+                              </label>
+                              {renderInheritanceBadge('poe_presupuesto_w')}
+                            </div>
                             <input
                               type="number"
                               min="0"
                               step="any"
+                              readOnly={isFieldInheritedAndLocked('poe_presupuesto_w')}
                               value={formData.poe_presupuesto_w}
                               onChange={(e) => setFormData({ ...formData, poe_presupuesto_w: e.target.value })}
                               placeholder="ej. 370"
-                              className="w-full px-3 py-1.5 border border-slate-300 rounded text-xs bg-white font-mono"
+                              className={`w-full px-3 py-1.5 border rounded text-xs font-mono ${
+                                isFieldInheritedAndLocked('poe_presupuesto_w')
+                                  ? 'bg-slate-100 text-slate-600 border-slate-300 cursor-not-allowed'
+                                  : 'bg-white text-slate-800 border-slate-300'
+                              }`}
                             />
                           </div>
                         </div>
@@ -3194,18 +3488,26 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                   {formData.tipo === 'nvr' && (
                     <div className="space-y-3">
                       <div>
-                        <label className="block text-[11px] text-slate-700 font-semibold mb-1">
-                          Canales Totales *
-                        </label>
+                        <div className="flex items-center justify-between mb-1 gap-1 flex-wrap">
+                          <label className="block text-[11px] text-slate-700 font-semibold">
+                            Canales Totales *
+                          </label>
+                          {renderInheritanceBadge('canales_totales')}
+                        </div>
                         <input
                           type="number"
                           required
                           min="1"
                           max="128"
+                          readOnly={isFieldInheritedAndLocked('canales_totales')}
                           value={formData.canales_totales}
                           onChange={(e) => setFormData({ ...formData, canales_totales: e.target.value })}
                           placeholder="ej. 16, 32 o 64"
-                          className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white font-mono focus:ring-1 focus:ring-blue-600 text-xs font-bold"
+                          className={`w-full px-3 py-1.5 border rounded font-mono focus:ring-1 focus:ring-blue-600 text-xs font-bold ${
+                            isFieldInheritedAndLocked('canales_totales')
+                              ? 'bg-slate-100 text-slate-600 border-slate-300 cursor-not-allowed'
+                              : 'bg-white text-slate-800 border-slate-300'
+                          }`}
                         />
                       </div>
                       <div className="grid grid-cols-2 gap-3">
@@ -3241,17 +3543,25 @@ export const RackElevation: React.FC<RackElevationProps> = ({
 
                   {formData.tipo === 'ups' && (
                     <div>
-                      <label className="block text-[11px] text-slate-700 font-semibold mb-1">
-                        Capacidad (VA)
-                      </label>
+                      <div className="flex items-center justify-between mb-1 gap-1 flex-wrap">
+                        <label className="block text-[11px] text-slate-700 font-semibold">
+                          Capacidad (VA)
+                        </label>
+                        {renderInheritanceBadge('capacidad_va')}
+                      </div>
                       <input
                         type="number"
                         min="100"
                         max="50000"
+                        readOnly={isFieldInheritedAndLocked('capacidad_va')}
                         value={formData.capacidad_va}
                         onChange={(e) => setFormData({ ...formData, capacidad_va: e.target.value })}
                         placeholder="ej. 1500 o 3000"
-                        className="w-full px-3 py-1.5 border border-slate-300 rounded bg-white font-mono focus:ring-1 focus:ring-blue-600 text-xs font-bold"
+                        className={`w-full px-3 py-1.5 border rounded font-mono focus:ring-1 focus:ring-blue-600 text-xs font-bold ${
+                          isFieldInheritedAndLocked('capacidad_va')
+                            ? 'bg-slate-100 text-slate-600 border-slate-300 cursor-not-allowed'
+                            : 'bg-white text-slate-800 border-slate-300'
+                        }`}
                       />
                     </div>
                   )}
