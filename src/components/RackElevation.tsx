@@ -3269,17 +3269,18 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={
-                    saving || 
-                    !formData.codigo.trim() ||
-                    !validateUSlotAvailability(
-                      Number(formData.posicion_u_fin || totalU),
-                      Number(formAlturaU) || 1,
-                      totalU,
-                      occupiedSlotsMap,
-                      isEditing ? formData.id : null
-                    ).isValid
-                  }
+                    disabled={
+                      saving || 
+                      !formData.codigo.trim() ||
+                      ((formData.tipo !== 'ups' || formData.es_rackeable !== false) && 
+                        !validateUSlotAvailability(
+                          Number(formData.posicion_u_fin || totalU),
+                          Number(formAlturaU) || 1,
+                          totalU,
+                          occupiedSlotsMap,
+                          isEditing ? formData.id : null
+                        ).isValid)
+                    }
                   className="px-4 py-1.5 text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded shadow-xs transition-colors disabled:opacity-50"
                 >
                   {saving ? 'Guardando...' : (isEditing ? 'Actualizar Equipo' : 'Montar en Rack')}
