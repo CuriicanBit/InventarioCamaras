@@ -73,10 +73,40 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
   const [puntosRed, setPuntosRed] = useState<Pick<PuntoRed, 'id' | 'rack_id'>[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchFilter, setSearchFilter] = useState<string>('');
-  const [soloRamasConRacks, setSoloRamasConRacks] = useState<boolean>(false);
+  const [soloRamasConRacks, setSoloRamasConRacks] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('nodoua_tree_solo_racks');
+      return saved ? JSON.parse(saved) : false;
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('nodoua_tree_solo_racks', JSON.stringify(soloRamasConRacks));
+    } catch (e) {
+      console.error(e);
+    }
+  }, [soloRamasConRacks]);  
 
   // Expanded tree nodes
-  const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({});
+  const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = localStorage.getItem('nodoua_tree_expanded_nodes');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('nodoua_tree_expanded_nodes', JSON.stringify(expandedNodes));
+    } catch (e) {
+      console.error(e);
+    }
+  }, [expandedNodes]);
 
   // Current selected rack
   const [currentRack, setCurrentRack] = useState<Rack | null>(null);
@@ -351,13 +381,16 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
         onSelectRack(targetRack);
       }
 
-      // Initial tree expansion: expand all nodes by default
-      const initialExpanded: Record<string, boolean> = {};
-      loadedSedes.forEach(s => { initialExpanded[`sede-${s.id}`] = true; });
-      loadedCampus.forEach(c => { initialExpanded[`campus-${c.id}`] = true; });
-      loadedEdificios.forEach(e => { initialExpanded[`edificio-${e.id}`] = true; });
-      loadedPisos.forEach(p => { initialExpanded[`piso-${p.id}`] = true; });
-      setExpandedNodes(initialExpanded);
+      // Initial tree expansion: Solo expandir por defecto si NO hay memoria guardada
+      const savedExpansion = localStorage.getItem('nodoua_tree_expanded_nodes');
+      if (!savedExpansion) {
+        const initialExpanded: Record<string, boolean> = {};
+        loadedSedes.forEach(s => { initialExpanded[`sede-${s.id}`] = true; });
+        loadedCampus.forEach(c => { initialExpanded[`campus-${c.id}`] = true; });
+        loadedEdificios.forEach(e => { initialExpanded[`edificio-${e.id}`] = true; });
+        loadedPisos.forEach(p => { initialExpanded[`piso-${p.id}`] = true; });
+        setExpandedNodes(initialExpanded);
+      }
     } catch (err) {
       console.error('Error loading physical tree:', err);
     } finally {
