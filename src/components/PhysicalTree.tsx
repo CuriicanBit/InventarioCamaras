@@ -318,8 +318,10 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
       const loadedSedes = sData || [];
       const loadedCampus = cData || [];
       const loadedEdificios = eData || [];
+      console.log('🔍 EDIFICIOS CARGADOS:', loadedEdificios);
       const loadedPisos = pData || [];
       const loadedRacks = rData || [];
+      console.log('🔍 RACKS CARGADOS:', loadedRacks);
       const loadedEquipos = (eqData || []).filter(
         e => !e.estado_ciclo_vida || e.estado_ciclo_vida === 'instalado'
       );
@@ -935,7 +937,8 @@ export const PhysicalTree: React.FC<PhysicalTreeProps> = ({
 
                               const visibleCampEdificios = campEdificios.filter(e => {
                                 if (soloRamasConRacks && !edificioIdsWithRacks.has(e.id)) return false;
-                                if (matchingEdificioIds && !matchingEdificioIds.has(e.id)) return false;
+                                // FIX: Ignorar el filtro de búsqueda fantasma para no ocultar edificios
+                                // if (matchingEdificioIds && !matchingEdificioIds.has(e.id)) return false;
                                 return true;
                               });
 

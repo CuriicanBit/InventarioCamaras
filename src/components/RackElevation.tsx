@@ -2841,7 +2841,16 @@ export const RackElevation: React.FC<RackElevationProps> = ({
                     isEditing ? formData.id : null
                   );
 
-                  if (validation.isValid) {
+                  if (formData.tipo === 'ups' && formData.es_rackeable === false) {
+                    return (
+                      <div className="p-2.5 bg-emerald-50 border border-emerald-300 rounded text-emerald-800 text-xs flex items-center gap-2 font-medium">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span>
+                          <strong>Equipo de piso / shaft:</strong> No consume unidades U del bastidor. Ubicación válida.
+                        </span>
+                      </div>
+                    );
+                  } else if (validation.isValid) {
                     return (
                       <div className="p-2.5 bg-emerald-50 border border-emerald-300 rounded text-emerald-800 text-xs flex items-center gap-2 font-medium">
                         <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
